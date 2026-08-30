@@ -708,48 +708,102 @@ export function DashboardHero() {
                             </div>
                           ) : (
                             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
-                              <div className="lg:col-span-8 rounded-xl bg-[#14171f] p-4 shadow-lg space-y-2.5 font-mono-code">
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2.5">
-                                    <div className="h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-white">
+                              {/* Authentic X / Social Media Feed Card (8 cols) */}
+                              <div className="lg:col-span-8 rounded-2xl bg-[#0b0e14] p-5 border border-zinc-800 shadow-xl space-y-3 font-sans">
+                                {/* Post Author Header */}
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex items-center gap-3">
+                                    {/* Avatar */}
+                                    <div className="h-10 w-10 rounded-full bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center text-xs font-extrabold text-white shadow-md shrink-0">
                                       CW
                                     </div>
                                     <div>
-                                      <div className="text-xs font-bold text-white flex items-center gap-1">
-                                        <span>ChainWatch Security</span>
-                                        <span className="text-cyan-400 text-[10px]">✓</span>
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="text-sm font-bold text-white hover:underline cursor-pointer">
+                                          ChainWatch Security
+                                        </span>
+                                        {/* Blue Verified Badge */}
+                                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-blue-500 text-[10px] text-white font-bold" title="Verified Security Researcher">
+                                          ✓
+                                        </span>
+                                        <span className="text-xs text-zinc-400 font-mono-code">@chainwatch_sec</span>
+                                        <span className="text-zinc-500 text-xs">·</span>
+                                        <span className="text-xs text-zinc-400">12s ago</span>
                                       </div>
-                                      <div className="text-[11px] text-zinc-400">@chainwatch_sec • 12s ago</div>
+                                      <div className="text-[11px] text-zinc-500 font-mono-code">
+                                        On-Chain Security & Exploits Surveillance
+                                      </div>
                                     </div>
                                   </div>
-                                  <span className="text-[11px] font-bold text-zinc-300 bg-zinc-800 px-2.5 py-0.5 rounded">
-                                    𝕏 / Social Intel
-                                  </span>
+
+                                  {/* Social Platform Tag & Source Link */}
+                                  <a
+                                    href="https://x.com/chainwatch_sec/status/1892837491823901"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="flex items-center gap-1.5 rounded-full bg-[#16181f] hover:bg-zinc-800 border border-zinc-700 px-3 py-1 text-xs font-mono-code font-semibold text-zinc-200 transition-all shrink-0 cursor-pointer"
+                                  >
+                                    <span className="font-bold">𝕏</span>
+                                    <span>Source ↗</span>
+                                  </a>
                                 </div>
-                                <p className="text-xs sm:text-sm text-zinc-100 font-sans leading-relaxed">
-                                  🚨 <strong className="text-red-400">ALERT:</strong> Unusual activity detected involving the <strong>Base Bridge</strong>. Large ETH outflows have occurred across multiple transactions within a short period. We are investigating whether this represents an exploit or authorized activity.
+
+                                {/* Post Body Text */}
+                                <p className="text-sm text-zinc-100 leading-relaxed pt-1">
+                                  🚨 <span className="font-bold text-red-400">ALERT:</span> Unusual activity detected involving the <strong className="text-white">Base Bridge</strong>. Large ETH outflows have occurred across multiple transactions within a short period. We are investigating whether this represents an exploit or authorized activity.
                                 </p>
-                                <div className="flex items-center gap-3 text-xs text-cyan-400 pt-1">
-                                  <span>Tx: 0x7355eb...b290 ↗</span>
-                                  <span className="text-zinc-600">•</span>
-                                  <span>Unconfirmed Signal (Ingested)</span>
+
+                                {/* Social Post Action Bar */}
+                                <div className="flex items-center justify-between pt-3 border-t border-zinc-800/60 text-xs text-zinc-400 font-mono-code">
+                                  <div className="flex items-center gap-6">
+                                    <span className="flex items-center gap-1.5 hover:text-cyan-400 cursor-pointer">
+                                      <span>💬</span> 48
+                                    </span>
+                                    <span className="flex items-center gap-1.5 hover:text-emerald-400 cursor-pointer">
+                                      <span>🔁</span> 142
+                                    </span>
+                                    <span className="flex items-center gap-1.5 hover:text-red-400 cursor-pointer">
+                                      <span>❤️</span> 894
+                                    </span>
+                                    <span className="flex items-center gap-1.5 hover:text-zinc-200 cursor-pointer hidden sm:flex">
+                                      <span>📊</span> 48.2K
+                                    </span>
+                                  </div>
+
+                                  <span className="text-[11px] text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-500/30">
+                                    ⚠️ Unconfirmed Signal (Ingested)
+                                  </span>
                                 </div>
                               </div>
 
-                              <div className="lg:col-span-4 rounded-xl bg-[#161208] p-4 flex flex-col justify-between space-y-2 font-mono-code border border-amber-500/30">
-                                <div className="space-y-1.5">
-                                  <div className="text-xs font-bold text-amber-400 uppercase tracking-wider">
-                                    NutShell Ingestion Engine
+                              {/* NutShell Ingestion Analysis Card (4 cols) */}
+                              <div className="lg:col-span-4 rounded-2xl bg-[#0a0d14] p-5 flex flex-col justify-between space-y-3 font-mono-code border border-amber-500/40 shadow-xl">
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between border-b border-amber-950 pb-2">
+                                    <span className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                                      NutShell Ingestion Engine
+                                    </span>
+                                    <span className="bg-amber-950 text-amber-300 text-[10px] px-2 py-0.5 rounded font-bold">
+                                      SIGNAL_INGESTED
+                                    </span>
                                   </div>
-                                  <div className="text-xs text-zinc-300 font-sans leading-relaxed">
-                                    Signal intercepted from X • Source reputation: <strong className="text-amber-200">MONITORED</strong>
-                                  </div>
-                                  <div className="text-xs text-zinc-400">
-                                    Extracted entities: <strong className="text-zinc-200">Base Bridge</strong>, <strong className="text-zinc-200">ETH</strong>, <strong className="text-zinc-200">Abnormal Outflow</strong>
+
+                                  <div className="space-y-1.5 text-xs">
+                                    <div className="text-zinc-300 font-sans leading-relaxed">
+                                      <strong>Source: </strong> X Social Firehose (<span className="text-cyan-300">@chainwatch_sec</span>)
+                                    </div>
+                                    <div className="text-zinc-400 text-[11px]">
+                                      <strong>Confidence: </strong> <span className="text-amber-300 font-bold">UNCONFIRMED</span> (Social claims require on-chain verification)
+                                    </div>
+                                    <div className="text-zinc-400 text-[11px] pt-1">
+                                      <strong>Extracted Entities: </strong>
+                                      <span className="text-zinc-200">Base Bridge, ETH, $40.2M Outflow</span>
+                                    </div>
                                   </div>
                                 </div>
-                                <div className="pt-2 border-t border-amber-950 text-xs text-emerald-400">
-                                  ✓ Ingestion complete. Dispatched on-chain telemetry scanner.
+
+                                <div className="pt-3 border-t border-zinc-800 text-xs text-emerald-400 leading-relaxed font-sans">
+                                  ✓ Ingestion complete. Triggered Stage 02 autonomous on-chain tool execution.
                                 </div>
                               </div>
                             </div>
