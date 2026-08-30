@@ -1,0 +1,41 @@
+{
+  "_comment": "Golden decoder fixture — PRD §3.2, verbatim from live fetchOrders() on Base mainnet. The `n` bigint suffixes are stripped and every scaled value is a string, so this file round-trips through JSON.parse without a BigInt replacer. Expected decode: strike $2,400.00 · premium $2.1506 · availableAmount 10,000 USDC.",
+  "order": {
+    "maker": "0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E",
+    "taker": "0x0000000000000000000000000000000000000000",
+    "option": "",
+    "isBuyer": true,
+    "numContracts": "0",
+    "price": "215059967",
+    "expiry": "1788076800",
+    "nonce": "70340925680368106032578170611921849573673796572967356435686864979623221623697",
+    "optionType": 1,
+    "strikes": ["240000000000"],
+    "strikePrice": "240000000000",
+    "collateralToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "underlyingToken": "0x4200000000000000000000000000000000000006",
+    "deadline": "1788076800"
+  },
+  "signature": "0x16e9bdf0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001b",
+  "availableAmount": "10000000000",
+  "makerAddress": "0xEcda1D002FBC55F2Fd3386bB4B9B95F859f3C39E",
+  "rawApiData": {
+    "collateral": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "priceFeed": "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70",
+    "implementation": "0x7355EB92dfb0503DB558a70c10843618932ab290",
+    "strikes": ["240000000000"],
+    "isCall": false,
+    "isLong": false,
+    "orderExpiryTimestamp": 1788016380,
+    "extraOptionData": "0x",
+    "maxCollateralUsable": "10000000000",
+    "optionBookAddress": "0x1bDff855d6811728acaDC00989e79143a2bdfDed",
+    "greeks": {
+      "delta": -0.0887,
+      "iv": 0.3111,
+      "gamma": 0.0048,
+      "theta": -3.8188,
+      "vega": 0.172
+    }
+  }
+}

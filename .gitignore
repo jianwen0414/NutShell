@@ -1,2 +1,27 @@
+# Docs kept out of the repo by team convention
 PRD.md
 PROJECT-PLAN.md
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+*.key
+wallet.json
+
+# Dependencies / build
+node_modules/
+.next/
+out/
+dist/
+coverage/
+
+# Tooling noise
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/
+
+# Local measurement + probe output
+/artifacts/
