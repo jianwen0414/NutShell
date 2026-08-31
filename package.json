@@ -12,7 +12,15 @@
     "probe:ttl": "tsx scripts/measure-ttl.ts",
     "identify:tokens": "tsx scripts/identify-tokens.ts",
     "build:asset-map": "tsx scripts/build-asset-map.ts",
-    "hedge:dry": "tsx scripts/dry-run-hedge.ts"
+    "hedge:dry": "tsx scripts/dry-run-hedge.ts",
+    "health": "tsx scripts/health.ts",
+    "hedge": "tsx scripts/dry-run-hedge.ts",
+    "demo:decline": "tsx scripts/decline-demo.ts",
+    "position:graded": "tsx scripts/open-graded-position.ts",
+    "position:settle": "tsx scripts/settle-position.ts",
+    "position:import": "tsx scripts/import-position.ts",
+    "inspect:tx": "tsx scripts/inspect-tx.ts",
+    "inspect:position": "tsx scripts/inspect-position.ts"
   },
   "dependencies": {
     "@thetanuts-finance/thetanuts-client": "^0.3.0",

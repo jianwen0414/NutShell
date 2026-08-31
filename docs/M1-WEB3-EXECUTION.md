@@ -12,14 +12,19 @@ Everything below was measured against the **live Base mainnet book**. Nothing is
 | | |
 |---|---|
 | Read paths | ✅ live — decode, asset resolution, TTL guard, strike selection |
-| Execution up to the signing boundary | ✅ live — sizing, exact approval, both transactions built |
-| Signing and broadcast | ⏸ blocked on burner funding (Stage 0) |
-| Unwind | ⚙️ built to the same boundary; measured recovery is `TODO(VERIFY-V6)` |
-| Attestation | ✅ payload, ladder, on-chain verifier; broadcast blocked on funding |
-| Tests | ✅ 102 passing |
+| Execution | ✅ **filled on mainnet** — see [FIRST-FILL.md](FIRST-FILL.md) |
+| Attestation | ✅ **on-chain**, verified by decoding the calldata back |
+| Position store | ✅ file-backed, with chain reconstruction for crash recovery |
+| Early unwind | ❌ **impossible on this venue** — measured, see below |
+| Settlement at expiry | ⚙️ instrumented; measurable after 2026-09-01T08:00Z |
+| Graded position | ⚙️ scripted and gated — must be fired 4–5 Sep |
+| Tests | ✅ 114 passing |
+
+Stage 4 exit condition is **met**: a protective put exists on Base mainnet,
+bought by the agent, with a live BaseScan URL.
 
 `dryRun: true` runs the complete pipeline against the live book and stops before
-signing. **Flipping `dryRun` to `false` is the only change needed once funded.**
+signing; `--live` is the only difference between a rehearsal and a real trade.
 
 ---
 
@@ -30,7 +35,7 @@ npm install                      # project-local; nothing is installed globally
 cp .env.example .env             # THETANUTS_RPC_URL is the only value read paths need
 
 npm run typecheck
-npm test                         # 102 tests, no network
+npm test                         # 114 tests, no network
 
 npm run probe                    # decode the live book + assert every 🔒 invariant
 npm run identify:tokens          # verify token decimals on-chain
@@ -248,14 +253,164 @@ either way.
 
 ---
 
-## What is blocked, and on what
+## 🔴 RESOLVED V6 — there is no early unwind, and recovery is 0%
+
+Static-called against the real open position `0x8d28b640…8240`, for zero gas:
+
+| Path | Result |
+|---|---|
+| `close()` | **reverts — "Buyer and seller same to close"** |
+| `reclaimCollateral()` | reverts — "Only seller can reclaim" |
+| `returnExcessCollateral()` | succeeds, returns **0** |
+| `transfer(isBuyer, target)` | succeeds — but it is a *gift*, not a sale |
+| `split()` | reverts — "Incorrect split fee", and does not exit anyway |
+
+`close()` annihilates a position only when **one address holds both sides**. We
+hold the long side alone.
+
+And there is nobody to sell to: **0 of 89 live vanilla PUT quotes carry
+`isLong: true`.** The market maker only ever *sells* puts; it never bids for
+them. Only the PHYSICAL_* products quote `isLong: true`, and those are a
+different instrument. There is no secondary market.
+
+**Measured premium recovery on an early rollback: 0%.** The only exit is expiry.
+
+This contradicts PRD §11 (`unwindPosition(… 'ROLLBACK')`), PRD §18 ("the
+rollback path has been executed live … measured premium recovery is recorded"),
+and PROJECT-PLAN §5 demo beat 6.
+
+`unwindPosition()` now **refuses** rather than broadcasting a known revert, and
+says why. Two honest replacements:
+
+- **`abandonPosition()`** — records the policy decision to stop protecting.
+  Sends nothing, because nothing can be sent. Realised PnL is the premium, in
+  full, stated plainly.
+- **`settlePosition()`** — measures what actually returns at expiry, from the
+  burner's balance delta.
+
+### The approved demo reframe: "the agent declines to spend"
+
+`npx tsx scripts/decline-demo.ts` runs it live. Two readings of the same event,
+priced against the same live book:
+
+| | Truth | Agreement | Severity | Tier | Committed |
+|---|---|---|---|---|---|
+| Signal | 91 | 86% | 5 | `HEDGE_FULL` | $3.00 |
+| Debunk | 91 | **31%** | 5 | `ESCALATE` | **$0.00** |
+
+The truth score does not move. **Agreement alone flips the decision** — which is
+exactly the difference between a consensus system and an averaging one.
+
+The saving is real *only because the gate runs before the money moves*. That is
+the whole argument for the AI gate, and it is a stronger beat than the recovery
+story it replaces — which could not have been told honestly.
+
+## ⚠️ The graded position must be fired 4–5 September
+
+`scripts/open-graded-position.ts` picks the longest-dated vanilla put that
+survives a stated deadline, and **refuses** if none does. Run today it refuses,
+correctly:
+
+```
+2026-09-01T08:00Z   4 quotes  16.1h out  ✗ expires first
+2026-09-02T08:00Z   6 quotes  40.1h out  ✗ expires first
+2026-09-03T08:00Z   8 quotes  64.1h out  ✗ expires first
+✗ NO ETH vanilla put survives 2026-09-06T23:59Z
+```
+
+The vanilla-put tenor has grown from ~52h to ~64h over two days, so firing on
+**4–5 Sep** yields a 7–8 Sep expiry that clears judging on the 6th.
+
+```bash
+npx tsx scripts/open-graded-position.ts                  # dry run, shows the calendar
+npx tsx scripts/open-graded-position.ts --live --confirm
+```
+
+## What is still open
 
 | Item | Blocked on | Ready |
 |---|---|---|
-| First real fill (Stage 4) | burner funding | `--live` flag, already wired |
-| Measured premium recovery (V6) | one open position | balance-delta measurement is coded |
-| Minimum fill granularity (V4) | one real fill | `MIN_FILL_USDC` is the tuning knob |
-| Option address extraction | one real receipt | best-effort log scan; a miss costs a UI link, not correctness |
-| `unwindPosition` position lookup | `positions` table (M2/M3) | inject via `setPositionResolver()` |
+| Measured settlement (V6, expiry leg) | position expiry, 2026-09-01T08:00Z | `scripts/settle-position.ts` |
+| Graded position | the calendar — fire 4–5 Sep | `scripts/open-graded-position.ts` |
+| Real Gonka request IDs in attestations | M2's verification layer | the payload field is wired |
+| Postgres position store | M2/M3's schema | the file store implements the same resolver contract |
 
-Nothing else in M1 is waiting on anything.
+**V4 (minimum fill granularity) is answered:** a $0.50 fill lands cleanly, and
+the binding floor is the quote's own premium capacity, not a protocol minimum.
+
+---
+
+## Newly measured on the first fill
+
+**The protocol fee is 12.5% of premium.** `OrderFilled` reported
+`feeCollected = 0.062499` on `premiumAmount = 0.499999`. The transfers confirm
+the split:
+
+```
+0.437500 USDC   burner → market maker                  (maker's net premium)
+0.062499 USDC   burner → OptionBook                    (protocol fee)
+690.32614 USDC  maker  → OptionBook → option contract  (collateral escrow)
+```
+
+The fee sits **inside** the quoted price, not on top of it — we paid exactly
+`price × contracts`. But the maker nets 87.5%, and any round trip pays it twice.
+The PRD does not mention this fee anywhere.
+
+**The decoder is confirmed against the contract's own arithmetic**, from the
+chain rather than from our code:
+
+1. Escrowed collateral `690.32614 USDC` equals this codebase's
+   `contracts × strike` exactly.
+2. `calculatePayout()` matches `(2380 − price) × 0.290053` at every probed
+   settlement price — $2,000 → `110.22014`, $2,200 → `52.20954`, ≥$2,380 → `0`.
+
+**Rounding is one micro-USDC.** Planned 0.500000, on-chain 0.499999, from the
+contract's integer division. The executor detects the divergence, warns, and
+reports the on-chain figure over its own.
+
+## The broadcast sequence, and why it is ordered that way
+
+1. **Approve the exact premium.** The fill pulls collateral via `transferFrom`,
+   so without this it reverts on allowance.
+2. **Re-check the quote TTL.** The approval costs a block or two and quotes live
+   57–117 s. Aborting here leaves only a spent approval, which is recoverable;
+   aborting after the fill is not.
+3. **Static-call the fill.** `eth_call` against real contract state proves the
+   transaction would succeed for zero gas, turning a would-be revert into a
+   clean typed error.
+4. **Send it**, then read `OrderFilled` for the authoritative option address,
+   premium, and fee.
+
+## Operator scripts
+
+```bash
+npm run typecheck && npm test          # 114 tests, no network
+
+npx tsx scripts/health.ts --expect-address 0x…   # gates a live run, exits non-zero on any problem
+npx tsx scripts/probe-book.ts                    # decode the book, assert every 🔒 invariant
+npx tsx scripts/dry-run-hedge.ts --asset ETH --budget 3.00
+npx tsx scripts/decline-demo.ts                  # the AI-gate beat, live, signs nothing
+npx tsx scripts/open-graded-position.ts          # the judged position (fire 4–5 Sep)
+npx tsx scripts/settle-position.ts               # list; add nsh_… --probe to inspect exits
+npx tsx scripts/inspect-tx.ts 0x…                # decode a fill or an attestation from a hash alone
+npx tsx scripts/inspect-position.ts 0x…          # probe every exit path, zero gas
+npx tsx scripts/import-position.ts 0x… --attestation 0x…   # rebuild a record from chain
+```
+
+`inspect-tx.ts` is the verifier a judge could run: given only a transaction
+hash it decodes the attestation calldata back to its canonical line and links
+it to the fill it attests.
+
+## Safety properties, all enforced in code
+
+- **Exact approvals.** `MaxUint256` appears nowhere in the codebase.
+- **Contract allowlist.** The agent may only call the OptionBook; an order
+  naming a different book is rejected before signing.
+- **Hard ceiling.** `HARD_CEILING_USDC` is applied in the sizing path; no
+  request parameter can raise it.
+- **One open hedge per asset** (PRD §10.6), enforced against the position store
+  and overridable only with an explicit `--allow-duplicate`.
+- **Dry run by default.** `--live` requires a signer, and the graded-position
+  script additionally requires `--confirm`.
+- **A stored quote is always stale.** Records carry `quoteIsStale: true` and
+  `raw` flattened to strings; nothing re-signs from disk.

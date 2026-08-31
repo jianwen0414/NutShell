@@ -18,6 +18,7 @@ import 'dotenv/config';
 import { attest, evidenceHashFor } from '../lib/attestation';
 import { config } from '../lib/config';
 import { newCorrelationId, safeStringify, toAppError } from '../lib/errors';
+import { openPositionFor, savePosition } from '../lib/positions';
 import { executeHedge, hasSigner, signerAddress } from '../lib/thetanuts';
 import type { HedgePosition, TxHash } from '../types/index';
 
@@ -51,6 +52,28 @@ async function main(): Promise<void> {
   if (live && !hasSigner()) {
     console.error('\n✗ --live requires THETANUTS_PRIVATE_KEY. Refusing.');
     process.exit(1);
+  }
+
+  // 🔒 One open hedge per asset — PRD §10.6. A real crisis emits dozens of
+  // alerts in minutes; without this the agent fires N hedges on one event and
+  // empties the reserve.
+  if (live && !has('allow-duplicate')) {
+    const existing = openPositionFor(asset);
+    if (existing) {
+      console.error(
+        [
+          '',
+          `✗ ${asset} already has an open hedge: ${existing.correlationId}`,
+          `  ${existing.contracts} contracts, ${existing.premiumPaidUsdc} USDC premium, expires ${existing.expiry}`,
+          `  option ${existing.optionAddress ?? '(unknown)'}`,
+          '',
+          '  PRD §10.6: at most one open hedge per asset. A second signal on an open',
+          '  position may only INCREASE size, never open a duplicate.',
+          '  Pass --allow-duplicate to override deliberately.',
+        ].join('\n'),
+      );
+      process.exit(1);
+    }
   }
 
   const minExpiryHours = flag('min-expiry-hours');
@@ -162,6 +185,14 @@ async function main(): Promise<void> {
   console.log(`  ladder          : ${attestation.ladderAttempts.map((a) => `${a.method}${a.ok ? '✓' : '✗'}`).join(' → ')}`);
   for (const a of attestation.ladderAttempts.filter((x) => !x.ok)) console.log(`      ${a.method}: ${a.error}`);
   if (attestation.txHash) console.log(`  txHash          : ${attestation.txHash}  ${attestation.baseScanUrl}`);
+
+  // 🔒 Persist a live fill before anything else can go wrong. An unrecorded
+  // position cannot be settled, attested against, or shown in the UI — and
+  // the only way back is reconstructing it from chain.
+  if (live) {
+    const file = savePosition(position, attestation);
+    console.log(`\n  position recorded: ${file}`);
+  }
 
   console.log(`\n✓ ${live ? 'LIVE FILL COMPLETE' : 'DRY RUN COMPLETE'} in ${elapsed}ms — ${live ? 'position is open' : 'nothing was signed or broadcast'}`);
   if (!live) {
