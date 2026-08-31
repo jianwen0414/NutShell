@@ -17,9 +17,10 @@
 
 import { ethers } from 'ethers';
 import {
+  OPTION_BOOK_ABI,
   ThetanutsClient,
-  type OrderWithSignature,
   type MarketDataResponse,
+  type OrderWithSignature,
 } from '@thetanuts-finance/thetanuts-client';
 
 import { AppError, mapSdkError, toJsonSafe } from './errors';
@@ -842,6 +843,7 @@ async function planExecution(
     fillTx,
     ttlAtBuildSeconds,
     buildLatencyMs,
+    buildStartedAtMs: localFetchedAtMs,
     ...(owner ? { signerAddress: owner } : {}),
     ...(balances ? { balances } : {}),
     gasEstimate,
@@ -971,36 +973,28 @@ export async function executeHedge(p: ExecuteHedgeParams): Promise<HedgePosition
 /**
  * The signing boundary. Everything above this function is exercised
  * identically on a dry run; only this function moves money.
+ *
+ * Sequence, in this order and for these reasons:
+ *
+ *   1. Approve the exact premium. The fill pulls collateral via
+ *      `transferFrom`, so without this the fill reverts on allowance.
+ *   2. Re-check the quote TTL. The approval costs a block or two, and this
+ *      venue's quotes live 57–117 s. Aborting here leaves only a spent
+ *      approval, which is recoverable; aborting after the fill is not.
+ *   3. Static-call the fill. `eth_call` against the real contract state
+ *      proves the transaction would succeed, for zero gas, and turns a
+ *      would-be revert into a clean typed error.
+ *   4. Send the fill, with a padded gas limit.
  */
 async function broadcast(p: ExecuteHedgeParams, plan: ExecutionPlan): Promise<HedgePosition> {
   const cid = p.correlationId;
   const signing = getSigningClient();
   const order = plan.selectedOrder;
   const raw = order.raw as OrderWithSignature;
+  const premiumRaw = BigInt(plan.premiumRaw);
   let approvalTxHash: TxHash | undefined;
 
-  try {
-    // 🔒 Exact-amount approval. Never MaxUint256 (PRD §14).
-    if (plan.approvalRequired) {
-      const receipt = await signing.erc20.approve(
-        order.collateralToken,
-        OPTION_BOOK_ADDRESS,
-        BigInt(plan.approvalAmountRaw),
-      );
-      approvalTxHash = receipt.hash as TxHash;
-    }
-
-    const receipt = await signing.optionBook.fillOrder(raw, BigInt(plan.premiumRaw), config.referrer);
-    const entryTxHash = receipt.hash as TxHash;
-
-    return positionFromPlan(p, plan, {
-      status: 'OPEN',
-      entryTxHash,
-      baseScanUrl: basescanTxUrl(entryTxHash),
-      ...(approvalTxHash ? { approvalTxHash } : {}),
-      ...(extractOptionAddress(receipt) ? { optionAddress: extractOptionAddress(receipt) } : {}),
-    });
-  } catch (e) {
+  const fail = (e: unknown, extra: Record<string, unknown> = {}): never => {
     const err = mapSdkError(e, cid);
     throw new AppError(err.code, err.message, {
       correlationId: cid,
@@ -1010,25 +1004,139 @@ async function broadcast(p: ExecuteHedgeParams, plan: ExecutionPlan): Promise<He
         approvalTxHash,
         plannedPremiumUsdc: plan.premiumUsdc,
         ttlAtBuildSeconds: plan.ttlAtBuildSeconds,
+        orderHash: order.orderHash,
+        ...extra,
       },
     });
+  };
+
+  // ── 1. Exact-amount approval. 🔒 Never MaxUint256 (PRD §14). ────────────
+  if (plan.approvalRequired) {
+    try {
+      const receipt = await signing.erc20.approve(order.collateralToken, OPTION_BOOK_ADDRESS, premiumRaw);
+      approvalTxHash = receipt.hash as TxHash;
+      plan.warnings.push(`Approved exactly ${plan.premiumUsdc} ${order.collateralSymbol} — tx ${receipt.hash}`);
+    } catch (e) {
+      fail(e, { stage: 'approve' });
+    }
+  }
+
+  // ── 2. TTL re-check, now that the approval has cost us blocks ───────────
+  const ttlNow = Math.round((order.quoteTtlSeconds - (Date.now() - plan.buildStartedAtMs) / 1000) * 10) / 10;
+  plan.ttlAtSignSeconds = ttlNow;
+  if (ttlNow <= 0) {
+    throw new AppError('QUOTE_EXPIRED', `The quote expired while the approval confirmed (TTL ${ttlNow}s).`, {
+      correlationId: cid,
+      details: { approvalTxHash, ttlAtBuildSeconds: plan.ttlAtBuildSeconds, ttlAtSignSeconds: ttlNow },
+    });
+  }
+
+  // ── 3. Static-call preflight — free proof the fill would succeed ────────
+  try {
+    const sim = await signing.optionBook.callStaticFillOrder(raw, premiumRaw, config.referrer);
+    if (!sim.success) {
+      throw new AppError('TX_REVERTED', `Fill simulation reverted before broadcast: ${sim.error?.message ?? 'unknown reason'}`, {
+        correlationId: cid,
+        details: { approvalTxHash, orderHash: order.orderHash, ttlAtSignSeconds: ttlNow },
+      });
+    }
+    if (sim.gasEstimate !== undefined && sim.gasEstimate !== null) {
+      plan.gasEstimate = { ...(plan.gasEstimate ?? {}), fill: String(sim.gasEstimate) };
+    }
+  } catch (e) {
+    if (isAppErrorLocal(e)) throw e;
+    fail(e, { stage: 'callStaticFillOrder' });
+  }
+
+  // ── 4. Send it ──────────────────────────────────────────────────────────
+  try {
+    const receipt = await signing.optionBook.fillOrder(raw, premiumRaw, config.referrer);
+    const entryTxHash = receipt.hash as TxHash;
+    const filled = parseOrderFilled(receipt);
+
+    if (filled) {
+      // Prefer the on-chain truth over our own arithmetic for anything the
+      // event reports. A silent divergence here would be a decode bug.
+      plan.onChain = {
+        optionAddress: filled.optionAddress,
+        premiumPaidRaw: filled.premiumAmount.toString(),
+        feeCollectedRaw: filled.feeCollected.toString(),
+        referralFeePaidRaw: filled.referralFeePaid.toString(),
+        gasUsed: receipt.gasUsed?.toString() ?? '0',
+        effectiveGasPriceWei: receipt.gasPrice?.toString() ?? '0',
+        blockNumber: receipt.blockNumber ?? 0,
+      };
+      const reported = fromScaled(filled.premiumAmount, order.collateralDecimals);
+      if (cmpDecimal(reported, plan.premiumUsdc) !== 0) {
+        plan.warnings.push(
+          `On-chain premium ${reported} differs from the planned ${plan.premiumUsdc} ${order.collateralSymbol}. ` +
+            'Reporting the on-chain figure.',
+        );
+      }
+    } else {
+      plan.warnings.push('Fill receipt carried no OrderFilled event — option address and fees are unavailable.');
+    }
+
+    const premiumPaidUsdc = filled
+      ? fromScaled(filled.premiumAmount, order.collateralDecimals)
+      : plan.premiumUsdc;
+
+    return positionFromPlan(p, plan, {
+      status: 'OPEN',
+      entryTxHash,
+      baseScanUrl: basescanTxUrl(entryTxHash),
+      premiumPaidUsdc,
+      ...(approvalTxHash ? { approvalTxHash } : {}),
+      ...(filled ? { optionAddress: filled.optionAddress } : {}),
+    });
+  } catch (e) {
+    if (isAppErrorLocal(e)) throw e;
+    return fail(e, { stage: 'fillOrder' });
   }
 }
 
+function isAppErrorLocal(e: unknown): e is AppError {
+  return e instanceof AppError;
+}
+
 /**
- * Pull the deployed option contract address out of a fill receipt.
+ * `OrderFilled(uint256 indexed nonce, address indexed buyer, address indexed
+ * seller, address optionAddress, uint256 premiumAmount, uint256 feeCollected,
+ * address referrer, uint256 referralFeePaid, bool sellerWasMaker)`
  *
- * The OptionBook clones an implementation per fill, so the new option's
- * address appears as a log emitter that is neither the book nor the
- * collateral token. Best-effort: a miss costs a UI link, not correctness.
+ * The authoritative record of what the fill actually did: which option
+ * contract was cloned, what premium moved, and what the protocol took. Read
+ * it rather than inferring the option address from which log emitter is not
+ * a token — that heuristic breaks the moment the book adds a hop.
  */
-function extractOptionAddress(receipt: { logs?: readonly { address: string }[] }): Address | undefined {
+function parseOrderFilled(receipt: {
+  logs?: readonly { address: string; topics: readonly string[]; data: string }[];
+}): {
+  optionAddress: Address;
+  premiumAmount: bigint;
+  feeCollected: bigint;
+  referralFeePaid: bigint;
+} | null {
+  const iface = new ethers.Interface(OPTION_BOOK_ABI as ethers.InterfaceAbi);
   const book = OPTION_BOOK_ADDRESS.toLowerCase();
+
   for (const log of receipt.logs ?? []) {
-    const addr = log.address?.toLowerCase();
-    if (addr && addr !== book && !isKnownToken(addr)) return addr as Address;
+    if (log.address?.toLowerCase() !== book) continue;
+    let parsed: ethers.LogDescription | null;
+    try {
+      parsed = iface.parseLog({ topics: [...log.topics], data: log.data });
+    } catch {
+      continue;
+    }
+    if (parsed?.name !== 'OrderFilled') continue;
+    return {
+      optionAddress: String(parsed.args.optionAddress).toLowerCase() as Address,
+      premiumAmount: BigInt(parsed.args.premiumAmount),
+      feeCollected: BigInt(parsed.args.feeCollected),
+      referralFeePaid: BigInt(parsed.args.referralFeePaid),
+    };
   }
-  return undefined;
+  return null;
 }
 
 // ─── Unwind ────────────────────────────────────────────────────────────────
@@ -1055,18 +1163,36 @@ export interface UnwindOptions {
 }
 
 /**
- * Unwind an open hedge — the live rollback path (PRD §5, demo beat 6).
+ * 🔒 RESOLVED — PRD §17 V6, measured on mainnet 2026-08-31.
  *
- * Mechanism: `BaseOption.close()` on the deployed option contract, reached
- * through the SDK's `option.close()`. Premium recovery is measured, never
- * estimated, by differencing the burner's collateral balance across the
- * close — PRD §17 V6 is explicit that this number is quoted from measurement
- * only.
+ * **There is no early unwind for a long vanilla put on this venue.** Every
+ * exit was static-called against a real open position
+ * (`0x8d28b640…8240`, ETH $2380 put, 0.290053 contracts):
  *
- * TODO(VERIFY-V6): the measured round-trip recovery cannot be recorded until
- * the burner is funded and one real position has been opened and closed. The
- * build and measurement path below is complete and exercised in dry run; only
- * the number itself is outstanding.
+ *   · `close()`                → reverts "Buyer and seller same to close".
+ *                                It annihilates a position only when ONE
+ *                                address holds BOTH sides. We hold the long
+ *                                side alone.
+ *   · `reclaimCollateral()`    → reverts "Only seller can reclaim".
+ *   · `returnExcessCollateral()` → succeeds, returns 0. Nothing is excess.
+ *   · `transfer(isBuyer,target)` → succeeds, but it is a GIFT, not a sale.
+ *   · `split()`                → needs a fee and does not exit the position.
+ *
+ * And there is no secondary market to sell into: **0 of 89 live vanilla PUT
+ * quotes carry `isLong: true`**. The market maker only ever sells puts; it
+ * never bids for them. (Only the PHYSICAL_* products quote `isLong: true`,
+ * and those are a different instrument.)
+ *
+ * So the measured premium recovery on an early rollback is **0%**. The only
+ * exit is expiry:
+ *   · settles OTM → payout 0, premium fully spent (this is insurance
+ *     expiring unused, which is the normal case)
+ *   · settles ITM → payout = (strike − settlement) × contracts
+ *
+ * `reason: 'ROLLBACK'` therefore cannot recover anything and this function
+ * refuses it rather than broadcasting a transaction that reverts. What the
+ * agent CAN honestly do on a debunk is stop paying for further protection
+ * and let the position lapse — see `abandonPosition`.
  */
 export async function unwindPosition(
   correlationId: CorrelationId,
@@ -1091,45 +1217,121 @@ export async function unwindPosition(
   }
   const optionAddress = position.optionAddress;
   if (!optionAddress) {
-    throw new AppError('VALIDATION_FAILED', `Position ${correlationId} carries no option contract address to close.`, {
+    throw new AppError('VALIDATION_FAILED', `Position ${correlationId} carries no option contract address.`, {
       correlationId,
     });
   }
 
-  const collateralToken = position.execution.selectedOrder.collateralToken;
-  const decimals = position.execution.selectedOrder.collateralDecimals;
-  const dryRun = opts.dryRun ?? !config.hasSigner;
+  // 🔒 Refuse rather than broadcast a transaction that is known to revert.
+  // Measured on mainnet: a long-only holder cannot close, and no bid exists.
+  throw new AppError(
+    'VALIDATION_FAILED',
+    `A long put cannot be unwound early on this venue (${reason}). BaseOption.close() reverts with ` +
+      '"Buyer and seller same to close" unless one address holds both sides, reclaimCollateral() is ' +
+      'seller-only, and 0 of the live vanilla PUT quotes bid for puts, so there is nothing to sell into. ' +
+      'Measured premium recovery on an early exit is 0%. Use abandonPosition() to record the policy ' +
+      'decision to stop protecting, or settlePosition() once the option has expired.',
+    {
+      correlationId,
+      details: {
+        optionAddress,
+        expiry: position.expiry,
+        premiumPaidUsdc: position.premiumPaidUsdc,
+        measuredRecoveryPct: 0,
+        exitProbes: {
+          'close()': 'reverts: Buyer and seller same to close',
+          'reclaimCollateral()': 'reverts: Only seller can reclaim',
+          'returnExcessCollateral()': 'succeeds, returns 0',
+          'transfer(isBuyer,target)': 'succeeds, but it is a gift with no counterparty',
+        },
+        buyBackLiquidity: 'vanilla PUT quotes with isLong=true: 0',
+      },
+    },
+  );
+}
 
-  if (dryRun) {
-    const iface = new ethers.Interface(['function close()']);
-    const tx = unsignedTx(optionAddress, iface.encodeFunctionData('close', []), `Close option ${optionAddress} (${reason})`);
-    return {
-      ...position,
-      status: 'PENDING',
-      execution: { ...position.execution, dryRun: true, fillTx: tx, warnings: [...position.execution.warnings, `Unwind (${reason}) built but not signed.`] },
-    };
+/**
+ * Record the policy decision to stop protecting — the honest form of a
+ * rollback on a venue with no early exit.
+ *
+ * Nothing is broadcast because nothing CAN be: the premium is already spent
+ * and unrecoverable (see `unwindPosition`). What this marks is that the agent
+ * has decided, on new evidence, not to extend or add protection — and that
+ * the existing position will lapse. The realised loss is the premium, stated
+ * plainly rather than dressed up as a recovery.
+ */
+export async function abandonPosition(
+  correlationId: CorrelationId,
+  reasonText: string,
+  opts: UnwindOptions = {},
+): Promise<HedgePosition> {
+  const position = opts.position ?? (_positionResolver ? await _positionResolver(correlationId) : null);
+  if (!position) {
+    throw new AppError('VALIDATION_FAILED', `No position found for ${correlationId}.`, { correlationId });
+  }
+  return {
+    ...position,
+    status: 'UNWOUND',
+    closedAt: new Date().toISOString(),
+    // The premium is gone; there is no recovery to net against it.
+    realisedPnlUsdc: `-${position.premiumPaidUsdc}`,
+    execution: {
+      ...position.execution,
+      warnings: [
+        ...position.execution.warnings,
+        `Abandoned: ${reasonText}. No transaction sent — this venue offers no early exit for a long put, ` +
+          `so the ${position.premiumPaidUsdc} USDC premium is unrecoverable and the position will lapse at ` +
+          `${position.expiry}. Measured recovery 0%.`,
+      ],
+    },
+  };
+}
+
+/**
+ * Settle an expired position and measure what actually came back.
+ *
+ * After expiry the option settles against a Chainlink TWAP. An OTM put pays
+ * nothing; an ITM put pays `(strike − settlement) × contracts` to the buyer.
+ * Recovery is measured from the burner's balance delta, never estimated.
+ */
+export async function settlePosition(
+  correlationId: CorrelationId,
+  opts: UnwindOptions = {},
+): Promise<HedgePosition> {
+  const position = opts.position ?? (_positionResolver ? await _positionResolver(correlationId) : null);
+  if (!position) {
+    throw new AppError('VALIDATION_FAILED', `No position found for ${correlationId}.`, { correlationId });
+  }
+  const optionAddress = position.optionAddress;
+  if (!optionAddress) {
+    throw new AppError('VALIDATION_FAILED', `Position ${correlationId} carries no option address.`, { correlationId });
+  }
+  if (Date.parse(position.expiry) > Date.now()) {
+    throw new AppError(
+      'VALIDATION_FAILED',
+      `Position ${correlationId} does not expire until ${position.expiry}; settlement is not available yet.`,
+      { correlationId, details: { expiry: position.expiry } },
+    );
   }
 
+  const order = position.execution.selectedOrder;
+  const decimals = order.collateralDecimals;
   const signing = getSigningClient();
   const owner = signerAddress() as Address;
 
   try {
-    const before = await signing.erc20.getBalance(collateralToken, owner);
+    const before = await signing.erc20.getBalance(order.collateralToken, owner);
     const result = await signing.option.close(optionAddress);
     await result.wait(1);
-    const after = await signing.erc20.getBalance(collateralToken, owner);
+    const after = await signing.erc20.getBalance(order.collateralToken, owner);
 
-    // Measured, not estimated — PRD §17 V6. `recovered` is the collateral
-    // that actually came back; PnL is that minus the premium originally paid,
-    // and stays negative when the round trip costs more than it returns.
     const recoveredRaw = after - before;
     const recovered = fromScaled(recoveredRaw, decimals);
     const realisedPnlUsdc = fromScaled(recoveredRaw - toScaled(position.premiumPaidUsdc, decimals), decimals);
-    const recoveryPct = divDecimal(recovered, position.premiumPaidUsdc, 4);
 
     return {
       ...position,
-      status: reason === 'HARVEST' ? 'HARVESTED' : 'UNWOUND',
+      status: 'EXPIRED',
       exitTxHash: result.txHash as TxHash,
       closedAt: new Date().toISOString(),
       realisedPnlUsdc,
@@ -1137,9 +1339,9 @@ export async function unwindPosition(
         ...position.execution,
         warnings: [
           ...position.execution.warnings,
-          `Unwind (${reason}): recovered ${recovered} ${position.execution.selectedOrder.collateralSymbol} ` +
-            `against ${position.premiumPaidUsdc} premium paid (${recoveryPct}× of premium, PnL ${realisedPnlUsdc}). ` +
-            'Measured from the burner balance delta, not estimated.',
+          `Settled at expiry: recovered ${recovered} ${order.collateralSymbol} against ` +
+            `${position.premiumPaidUsdc} premium paid (PnL ${realisedPnlUsdc}). Measured from the ` +
+            'burner balance delta, not estimated.',
         ],
       },
     };
@@ -1147,6 +1349,7 @@ export async function unwindPosition(
     throw mapSdkError(e, correlationId);
   }
 }
+
 
 // ─── Health ────────────────────────────────────────────────────────────────
 

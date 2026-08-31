@@ -239,8 +239,30 @@ export interface ExecutionPlan {
   fillTx: UnsignedTx;
   /** Quote TTL remaining when the transaction was built, on the feed clock. */
   ttlAtBuildSeconds: number;
+  /**
+   * Quote TTL remaining at the moment of the fill, after the approval has
+   * confirmed. This is the number that actually decides whether the fill
+   * lands; `ttlAtBuildSeconds` precedes the approval's block time.
+   */
+  ttlAtSignSeconds?: number;
   /** Time from re-fetch to built transaction. Must stay well inside the TTL. */
   buildLatencyMs: number;
+  /** Local wall clock when the book was fetched — the basis for TTL decay. */
+  buildStartedAtMs: number;
+  /**
+   * What the chain actually reported, read from the `OrderFilled` event.
+   * Authoritative over this module's own arithmetic; a divergence is logged
+   * as a warning rather than silently reconciled.
+   */
+  onChain?: {
+    optionAddress: Address;
+    premiumPaidRaw: string;
+    feeCollectedRaw: string;
+    referralFeePaidRaw: string;
+    gasUsed: string;
+    effectiveGasPriceWei: string;
+    blockNumber: number;
+  };
   /** Address the transactions would be sent from, when a signer is configured. */
   signerAddress?: Address;
   /** Burner balances at build time, when a signer is configured. */
