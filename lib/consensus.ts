@@ -1,5 +1,5 @@
-import type { ConsensusMetrics, ModelVerdict, Stance } from '../types/index.js';
-import { AppError } from './errors.js';
+import type { ConsensusMetrics, ModelVerdict, Stance } from "@/types";
+import { AppError } from './errors';
 
 /** Quorum is 2 of 3. Never trade on a single model's opinion. */
 export const QUORUM_MIN = 2;

@@ -1,4 +1,4 @@
-import type { MappingRule } from '../types/index.js';
+import type { MappingRule } from "@/types";
 
 /**
  * Which asset does this alert actually concern?

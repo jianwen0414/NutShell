@@ -1,6 +1,6 @@
-import type { CorrelationId, ISO8601, UsdcAmount, VaultState } from '../types/index.js';
-import { AppError } from './errors.js';
-import { fromMicros, toMicros } from './policy.js';
+import type { CorrelationId, ISO8601, UsdcAmount, VaultState } from "@/types";
+import { AppError } from './errors';
+import { fromMicros, toMicros } from './policy';
 
 /**
  * Premium funding.

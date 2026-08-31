@@ -9,11 +9,11 @@ import type {
   JobView,
   ModelVerdict,
   VerificationResult,
-} from '../types/index.js';
-import { AppError, asAppError } from '../lib/errors.js';
-import { verifyThreat } from '../lib/gonka.js';
-import { decide, thresholdsFromEnv, type PolicyState, type Thresholds } from '../lib/policy.js';
-import type { VaultDriver } from '../lib/vault.js';
+} from "@/types";
+import { AppError, asAppError } from '../lib/errors';
+import { verifyThreat } from '../lib/gonka';
+import { decide, thresholdsFromEnv, type PolicyState, type Thresholds } from '../lib/policy';
+import type { VaultDriver } from '../lib/vault';
 
 /**
  * alert → verify → decide → execute → attest.

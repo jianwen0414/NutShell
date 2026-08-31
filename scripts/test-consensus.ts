@@ -16,8 +16,8 @@
  *   conviction  = (truthScore/100) × agreement
  */
 import assert from 'node:assert/strict';
-import { computeConsensus } from '../lib/consensus.js';
-import type { ModelVerdict, Stance } from '../types/index.js';
+import { computeConsensus } from '../lib/consensus';
+import type { ModelVerdict, Stance } from "@/types";
 
 let passed = 0;
 let failed = 0;

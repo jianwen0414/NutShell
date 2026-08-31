@@ -8,14 +8,11 @@
  * same-moment control.
  */
 import OpenAI from 'openai';
-import { ANALYST_PROMPT, renderAlert, resolveModels } from '../lib/gonka.js';
-import type { AlertEvent } from '../types/index.js';
+import { ANALYST_PROMPT, renderAlert, resolveModels } from '../lib/gonka';
+import type { AlertEvent } from "@/types";
+import { loadEnv } from "../lib/env";
 
-try {
-  process.loadEnvFile('.env');
-} catch {
-  /* ambient env */
-}
+loadEnv();
 
 const client = new OpenAI({
   apiKey: process.env.GONKA_API_KEY!,

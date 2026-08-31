@@ -9,8 +9,7 @@
     "lint": "eslint",
     "worker": "tsx worker/index.ts",
     "demo": "tsx scripts/demo.ts",
-    "test": "npx tsx scripts/test-decimals.ts",
-    "test:all": "npm run test:gonka && npm run test:consensus && npm run test:policy && npm run test:vault && npm run test:worker",
+    "test:all": "npm run test:decimals && npm run test:gonka && npm run test:consensus && npm run test:policy && npm run test:vault && npm run test:worker",
     "test:gonka": "tsx scripts/test-gonka.ts",
     "test:consensus": "tsx scripts/test-consensus.ts",
     "test:policy": "tsx scripts/test-policy.ts",
@@ -19,13 +18,14 @@
     "probe:gonka": "tsx scripts/probe-gonka.ts",
     "diag:kimi": "tsx scripts/diag-kimi.ts",
     "verify:chain": "tsx scripts/verify-chain-link.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:decimals": "tsx scripts/test-decimals.ts"
   },
   "dependencies": {
     "next": "16.3.3",
-    "openai": "^4.77.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "openai": "^4.77.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -36,7 +36,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.3",
     "tailwindcss": "^4",
-    "tsx": "^4.19.2",
-    "typescript": "^5"
+    "typescript": "^5",
+    "tsx": "^4.19.2"
   }
 }

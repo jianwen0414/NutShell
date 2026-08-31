@@ -19,10 +19,10 @@ import {
   type Job,
   type PipelineDeps,
   type PipelineEvent,
-} from '../worker/pipeline.js';
-import { InMemoryJobStore, EventBus } from '../worker/index.js';
-import { InMemoryLedgerStore, SimulatedVaultDriver, type VaultConfig } from '../lib/vault.js';
-import type { Thresholds } from '../lib/policy.js';
+} from '../worker/pipeline';
+import { InMemoryJobStore, EventBus } from '../worker/index';
+import { InMemoryLedgerStore, SimulatedVaultDriver, type VaultConfig } from '../lib/vault';
+import type { Thresholds } from '../lib/policy';
 import type {
   AlertEvent,
   Attestation,
@@ -30,7 +30,7 @@ import type {
   HedgeDecision,
   HedgePosition,
   VerificationResult,
-} from '../types/index.js';
+} from "@/types";
 
 let passed = 0;
 let failed = 0;

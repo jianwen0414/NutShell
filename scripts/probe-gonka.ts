@@ -12,14 +12,11 @@
  */
 import { performance } from 'node:perf_hooks';
 import OpenAI from 'openai';
-import type { AlertEvent } from '../types/index.js';
-import { resolveModels, verifyThreat, renderAlert, MODEL_FAMILIES } from '../lib/gonka.js';
+import type { AlertEvent } from "@/types";
+import { resolveModels, verifyThreat, renderAlert, MODEL_FAMILIES } from '../lib/gonka';
+import { loadEnv } from "../lib/env";
 
-try {
-  process.loadEnvFile('.env');
-} catch {
-  /* no .env — rely on the ambient environment */
-}
+loadEnv();
 
 const BASE_URL = process.env.GONKA_BASE_URL ?? 'https://api.gonkarouter.io/v1';
 

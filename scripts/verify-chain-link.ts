@@ -11,13 +11,10 @@
  * Run this before the demo. If it fails, do not show the link.
  */
 import OpenAI from 'openai';
-import { chainUrlForShard, parseShardId, resolveModels } from '../lib/gonka.js';
+import { chainUrlForShard, parseShardId, resolveModels } from '../lib/gonka';
+import { loadEnv } from "../lib/env";
 
-try {
-  process.loadEnvFile('.env');
-} catch {
-  /* ambient env */
-}
+loadEnv();
 
 const CHAIN = process.env.GONKA_CHAIN_API ?? 'https://node1.gonka.ai:8443/chain-api';
 

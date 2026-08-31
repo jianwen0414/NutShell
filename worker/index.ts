@@ -1,6 +1,7 @@
-import type { ISO8601 } from '../types/index.js';
-import { SimulatedVaultDriver } from '../lib/vault.js';
-import { resolveModels } from '../lib/gonka.js';
+import type { ISO8601 } from "@/types";
+import { SimulatedVaultDriver } from '../lib/vault';
+import { resolveModels } from '../lib/gonka';
+import { loadEnv } from "../lib/env";
 import {
   classifyStale,
   runJob,
@@ -8,7 +9,7 @@ import {
   type JobStore,
   type PipelineDeps,
   type PipelineEvent,
-} from './pipeline.js';
+} from './pipeline';
 
 /**
  * The agent loop.
@@ -59,6 +60,11 @@ export class InMemoryJobStore implements JobStore {
   /** Test and API helper: enqueue work for the loop to find. */
   async enqueue(job: Job): Promise<void> {
     await this.save(job);
+  }
+
+  /** Every job this process has seen. Used for the dashboard counters. */
+  async all(): Promise<Job[]> {
+    return [...this.jobs.values()];
   }
 }
 
@@ -180,11 +186,7 @@ const isEntrypoint =
   typeof process !== 'undefined' && process.argv[1]?.replace(/\\/g, '/').endsWith('worker/index.ts');
 
 if (isEntrypoint) {
-  try {
-    process.loadEnvFile('.env');
-  } catch {
-    /* ambient env */
-  }
+  loadEnv();
   const store = new InMemoryJobStore();
   const bus = new EventBus();
   const controller = new AbortController();

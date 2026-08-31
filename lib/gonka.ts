@@ -7,9 +7,10 @@ import type {
   Stance,
   VerificationResult,
   VoteFailure,
-} from "../types/index.js";
-import { AppError, newCorrelationId } from "./errors.js";
-import { computeConsensus, QUORUM_MIN } from "./consensus.js";
+} from "@/types";
+import { AppError } from "./errors";
+import { newCorrelationId } from "./ids";
+import { computeConsensus, QUORUM_MIN } from "./consensus";
 
 // ── Client ────────────────────────────────────────────────────────────────
 // Gonka only. No OpenAI, no Anthropic, no local model, not even as a

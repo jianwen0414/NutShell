@@ -18,9 +18,9 @@ import {
   toMicros,
   type PolicyState,
   type Thresholds,
-} from '../lib/policy.js';
-import { mapEventToAsset } from '../lib/event-mapping.js';
-import type { AlertEvent, ConsensusMetrics, VerificationResult } from '../types/index.js';
+} from '../lib/policy';
+import { mapEventToAsset } from '../lib/event-mapping';
+import type { AlertEvent, ConsensusMetrics, VerificationResult } from "@/types";
 
 let passed = 0;
 let failed = 0;

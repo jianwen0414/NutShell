@@ -12,19 +12,16 @@
  * prompt comes back from the router's cache in milliseconds and will make the
  * pipeline look far faster than it is on the day.
  */
-import { newJob, runJob, type Executor, type PipelineDeps } from '../worker/pipeline.js';
-import { EventBus, InMemoryJobStore } from '../worker/index.js';
-import { InMemoryLedgerStore, SimulatedVaultDriver, SIMULATED_VAULT_BANNER } from '../lib/vault.js';
-import { thresholdsFromEnv } from '../lib/policy.js';
-import { newCorrelationId } from '../lib/errors.js';
-import type { AlertEvent, HedgeDecision, HedgePosition } from '../types/index.js';
+import { newJob, runJob, type Executor, type PipelineDeps } from '../worker/pipeline';
+import { EventBus, InMemoryJobStore } from '../worker/index';
+import { InMemoryLedgerStore, SimulatedVaultDriver, SIMULATED_VAULT_BANNER } from '../lib/vault';
+import { thresholdsFromEnv } from '../lib/policy';
+import { newCorrelationId } from '../lib/ids';
+import type { AlertEvent, HedgeDecision, HedgePosition } from "@/types";
 import { createHash } from 'node:crypto';
+import { loadEnv } from "../lib/env";
 
-try {
-  process.loadEnvFile('.env');
-} catch {
-  /* ambient env */
-}
+loadEnv();
 
 const DEFAULT_TEXT =
   'Security researchers at BlockSec report an active exploit against a cross-chain bridge on ' +

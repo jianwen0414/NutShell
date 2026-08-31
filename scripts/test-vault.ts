@@ -16,7 +16,7 @@ import {
   deriveState,
   type LedgerEntry,
   type VaultConfig,
-} from '../lib/vault.js';
+} from '../lib/vault';
 
 let passed = 0;
 let failed = 0;

@@ -7,8 +7,8 @@ import type {
   ISO8601,
   UsdcAmount,
   VerificationResult,
-} from '../types/index.js';
-import { mapEventToAsset } from './event-mapping.js';
+} from "@/types";
+import { mapEventToAsset } from './event-mapping';
 
 /**
  * Turns a verdict into a decision,

@@ -7,7 +7,7 @@
  * its id format these fail loudly instead of silently dropping the chain link.
  */
 import assert from 'node:assert/strict';
-import { chainUrlForShard, extractJson, parseShardId } from '../lib/gonka.js';
+import { chainUrlForShard, extractJson, parseShardId } from '../lib/gonka';
 
 let passed = 0;
 let failed = 0;
