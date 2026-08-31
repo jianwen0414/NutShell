@@ -1,0 +1,42 @@
+{
+  "name": "nutshell",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint",
+    "worker": "tsx worker/index.ts",
+    "demo": "tsx scripts/demo.ts",
+    "test": "npx tsx scripts/test-decimals.ts",
+    "test:all": "npm run test:gonka && npm run test:consensus && npm run test:policy && npm run test:vault && npm run test:worker",
+    "test:gonka": "tsx scripts/test-gonka.ts",
+    "test:consensus": "tsx scripts/test-consensus.ts",
+    "test:policy": "tsx scripts/test-policy.ts",
+    "test:vault": "tsx scripts/test-vault.ts",
+    "test:worker": "tsx scripts/test-worker.ts",
+    "probe:gonka": "tsx scripts/probe-gonka.ts",
+    "diag:kimi": "tsx scripts/diag-kimi.ts",
+    "verify:chain": "tsx scripts/verify-chain-link.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.3.3",
+    "openai": "^4.77.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.3",
+    "tailwindcss": "^4",
+    "tsx": "^4.19.2",
+    "typescript": "^5"
+  }
+}

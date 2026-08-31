@@ -1,2 +1,25 @@
+# Secrets — §14. THETANUTS_PRIVATE_KEY lives here. Never commit.
+.env
+.env.*
+!.env.example
+*.key
+wallet.json
+
+# Dependencies / build
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# Local
+.DS_Store
+*.log
+.vercel
+
+# Working notes, kept local
+docs/
+
+# Spec docs
 PRD.md
 PROJECT-PLAN.md
