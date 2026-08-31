@@ -44,19 +44,19 @@ const PRESET_CLAIMS = [
       decision: "HEDGE_FULL" as const,
       models: [
         {
-          name: "MiniMax-M2.5",
+          name: "MiniMax-M2.7",
           score: 88,
           stance: "REAL" as const,
           reason: "Velocity spike 4.2x baseline & destination matches drain pattern.",
         },
         {
-          name: "Kimi-k1.5",
+          name: "Kimi-K2.6",
           score: 86,
           stance: "REAL" as const,
           reason: "Pause emitted 66s post-outflow confirms unauthorized event.",
         },
         {
-          name: "GLM-4",
+          name: "DeepSeek-V4-Flash",
           score: 88,
           stance: "REAL" as const,
           reason: "Multi-sig emergency circuit breaker triggered immediately.",
@@ -78,19 +78,19 @@ const PRESET_CLAIMS = [
       decision: "REJECT" as const,
       models: [
         {
-          name: "MiniMax-M2.5",
+          name: "MiniMax-M2.7",
           score: 15,
           stance: "FAKE" as const,
           reason: "Zero blacklist bytecode events detected on Base USDC contract.",
         },
         {
-          name: "Kimi-k1.5",
+          name: "Kimi-K2.6",
           score: 20,
           stance: "FAKE" as const,
           reason: "Attestation reserves and redemption channels nominal.",
         },
         {
-          name: "GLM-4",
+          name: "DeepSeek-V4-Flash",
           score: 19,
           stance: "FAKE" as const,
           reason: "Unsubstantiated social leak lacking cryptographic proof.",
@@ -112,19 +112,19 @@ const PRESET_CLAIMS = [
       decision: "WATCH" as const,
       models: [
         {
-          name: "MiniMax-M2.5",
+          name: "MiniMax-M2.7",
           score: 40,
           stance: "UNCERTAIN" as const,
           reason: "Normal arbitrageur rebalance window in progress.",
         },
         {
-          name: "Kimi-k1.5",
+          name: "Kimi-K2.6",
           score: 45,
           stance: "UNCERTAIN" as const,
           reason: "Slippage remains beneath the 1.5% volatility threshold.",
         },
         {
-          name: "GLM-4",
+          name: "DeepSeek-V4-Flash",
           score: 41,
           stance: "UNCERTAIN" as const,
           reason: "No contract vulnerability or abnormal gas spike observed.",
@@ -174,6 +174,9 @@ export default function ControlPage() {
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyStep, setVerifyStep] = useState<number>(0);
   const [verifiedOutcome, setVerifiedOutcome] = useState<VerificationOutcome | null>(null);
+  // Verdicts as they arrive, so the progress rows show real models and real
+  // scores rather than a fixed slot per model.
+  const [liveModels, setLiveModels] = useState<VerificationOutcome["models"]>([]);
   
   const [history, setHistory] = useState<HistoryItem[]>(INITIAL_HISTORY);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -185,73 +188,130 @@ export default function ControlPage() {
     setTimeout(() => setToastMessage(null), 3000);
   }
 
-  function handleVerify() {
+  /**
+   * Runs the real pipeline. The step indicator, the scroll and the result
+   * panels are unchanged; they are driven by events arriving rather than by a
+   * chain of timers, so a slow model looks slow and a model that drops out is
+   * missing rather than invented.
+   *
+   * This posts to the public verify route, which verifies and decides but
+   * never trades. Reaching the book needs an operator token, which does not
+   * belong in the browser.
+   */
+  async function handleVerify() {
     if (!claimText.trim()) return;
     setIsVerifying(true);
-    setVerifyStep(1); // Parsing claim
+    setVerifyStep(1);
     setVerifiedOutcome(null);
+    setLiveModels([]);
 
-    // Scroll to verification result area
     setTimeout(() => {
       verificationResultRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }, 100);
 
-    setTimeout(() => {
-      setVerifyStep(2); // MiniMax analyzing
+    let jobId: string;
+    try {
+      const res = await fetch("/api/verify", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: claimText.trim(), sourceUrl: sourceUrl || undefined }),
+      });
+      const body = await res.json();
+      if (!res.ok || !body?.jobId) throw new Error(body?.error?.message ?? "Could not start.");
+      jobId = body.jobId;
+    } catch (e) {
+      setIsVerifying(false);
+      setVerifyStep(0);
+      setToastMessage(e instanceof Error ? e.message : "Verification failed to start.");
+      return;
+    }
 
-      setTimeout(() => {
-        setVerifyStep(3); // GLM analyzing
+    const models: VerificationOutcome["models"] = [];
+    let truthScore = 0;
+    let agreement = 0;
+    let decision: VerificationOutcome["decision"] = "WATCH";
+    let trace = "";
 
-        setTimeout(() => {
-          setVerifyStep(4); // Kimi analyzing / challenge
+    const es = new EventSource(`/api/verify/${jobId}/stream`);
 
-          setTimeout(() => {
-            setVerifyStep(5); // Calculating consensus
+    es.addEventListener("verdict", (ev) => {
+      const v = JSON.parse((ev as MessageEvent).data);
+      models.push({
+        name: v.modelId.split("/").pop() ?? v.modelId,
+        score: v.claimScore,
+        stance: v.stance,
+        reason: v.keyEvidence?.[0] ?? v.redFlags?.[0] ?? "No evidence cited.",
+      });
+      setLiveModels([...models]);
+      setVerifyStep(Math.min(4, models.length + 1));
+    });
 
-            setTimeout(() => {
-              const match = PRESET_CLAIMS.find((p) => p.text.slice(0, 20) === claimText.slice(0, 20));
-              let outcome: VerificationOutcome;
-              if (match) {
-                outcome = { ...match.outcome, sourceUrl };
-              } else {
-                outcome = {
-                  claim: claimText,
-                  sourceUrl,
-                  truthScore: 78,
-                  agreement: 90,
-                  verdict: "REAL INCIDENT",
-                  decision: "HEDGE_FULL",
-                  models: [
-                    { name: "MiniMax-M2.5", score: 80, stance: "REAL", reason: "Anomalous contract interaction corroborated on-chain." },
-                    { name: "Kimi-k1.5", score: 76, stance: "REAL", reason: "Cross-referenced telemetry indicates risk spike." },
-                    { name: "GLM-4", score: 78, stance: "REAL", reason: "Consensus threshold met for defensive protection." },
-                  ],
-                  resolutionTrace: "Custom manual claim verified across Gonka Triad. Score 78 meets action threshold.",
-                };
-              }
+    es.addEventListener("consensus", (ev) => {
+      const c = JSON.parse((ev as MessageEvent).data);
+      truthScore = c.truthScore;
+      agreement = Math.round(c.agreement * 100);
+      setVerifyStep(5);
+    });
 
-              setVerifiedOutcome(outcome);
-              setIsVerifying(false);
-              setVerifyStep(0);
+    es.addEventListener("decision", (ev) => {
+      const d = JSON.parse((ev as MessageEvent).data);
+      decision = d.tier;
+      trace = d.reason;
+    });
 
-              // Add to history
-              setHistory((prev) => [
-                {
-                  id: `hist-${Date.now()}`,
-                  claim: claimText.slice(0, 50) + (claimText.length > 50 ? "..." : ""),
-                  source: sourceUrl ? "Custom URL" : "Manual Paste",
-                  verdict: outcome.verdict === "REAL INCIDENT" ? "REAL" : outcome.verdict === "FALSE ALARM" ? "FAKE" : "WATCH",
-                  truthScore: outcome.truthScore,
-                  timeAgo: "Just now",
-                  outcome,
-                },
-                ...prev,
-              ]);
-            }, 500);
-          }, 600);
-        }, 600);
-      }, 600);
-    }, 700);
+    const settle = () => {
+      es.close();
+      // Bands match the policy engine: hedge at 70, reject below 40.
+      const verdict: VerificationOutcome["verdict"] =
+        truthScore >= 70 ? "REAL INCIDENT" : truthScore < 40 ? "FALSE ALARM" : "SUSPICIOUS / WATCH";
+
+      const outcome: VerificationOutcome = {
+        claim: claimText,
+        sourceUrl,
+        truthScore,
+        agreement,
+        verdict,
+        decision,
+        models,
+        resolutionTrace:
+          trace || `Verified across ${models.length} of 3 models. Truth score ${truthScore}.`,
+      };
+
+      setVerifiedOutcome(outcome);
+      setIsVerifying(false);
+      setVerifyStep(0);
+
+      setHistory((prev) => [
+        {
+          id: `hist-${Date.now()}`,
+          claim: claimText.slice(0, 50) + (claimText.length > 50 ? "..." : ""),
+          source: sourceUrl ? "Custom URL" : "Manual Paste",
+          verdict:
+            outcome.verdict === "REAL INCIDENT"
+              ? "REAL"
+              : outcome.verdict === "FALSE ALARM"
+                ? "FAKE"
+                : "WATCH",
+          truthScore: outcome.truthScore,
+          timeAgo: "Just now",
+          outcome,
+        },
+        ...prev,
+      ]);
+    };
+
+    es.addEventListener("done", settle);
+    es.addEventListener("error", (ev) => {
+      const raw = (ev as MessageEvent).data;
+      if (raw) {
+        try {
+          setToastMessage(JSON.parse(raw)?.error?.message ?? "Verification failed.");
+        } catch {
+          setToastMessage("Verification failed.");
+        }
+      }
+      settle();
+    });
   }
 
   return (
@@ -473,24 +533,27 @@ export default function ControlPage() {
                   <span className="text-zinc-300">1. Parsing extracted claims & entities:</span>
                   <span className="text-emerald-400 font-bold">✓ DONE</span>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-zinc-300">2. MiniMax evaluating transaction velocity:</span>
-                  <span className={verifyStep >= 2 ? "text-emerald-400 font-bold" : "text-cyan-400 animate-pulse"}>
-                    {verifyStep >= 2 ? "✓ DONE (88%)" : "⟳ ANALYZING..."}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-zinc-300">3. GLM evaluating pause state variable:</span>
-                  <span className={verifyStep >= 3 ? "text-emerald-400 font-bold" : "text-cyan-400 animate-pulse"}>
-                    {verifyStep >= 3 ? "✓ DONE (88%)" : "⟳ ANALYZING..."}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-zinc-300">4. Kimi checking pause timestamp correlation:</span>
-                  <span className={verifyStep >= 4 ? "text-emerald-400 font-bold" : "text-cyan-400 animate-pulse"}>
-                    {verifyStep >= 4 ? "✓ DONE (86%)" : "⟳ ANALYZING..."}
-                  </span>
-                </div>
+                  {liveModels.map((m, i) => (
+                    <div key={m.name} className="flex items-center justify-between">
+                      <span className="text-zinc-300 truncate pr-2">
+                        {i + 2}. {m.name} returned a verdict:
+                      </span>
+                      <span className="text-emerald-400 font-bold whitespace-nowrap">
+                        ✓ DONE ({m.score}%)
+                      </span>
+                    </div>
+                  ))}
+
+                  {liveModels.length < 3 &&
+                    Array.from({ length: 3 - liveModels.length }).map((_, i) => (
+                      <div key={`pending-${i}`} className="flex items-center justify-between">
+                        <span className="text-zinc-300">
+                          {liveModels.length + i + 2}. Awaiting a verdict:
+                        </span>
+                        <span className="text-cyan-400 animate-pulse">⟳ ANALYZING...</span>
+                      </div>
+                    ))}
+
                 <div className="flex items-center justify-between">
                   <span className="text-zinc-300">5. Computing consensus concordance & policy check:</span>
                   <span className={verifyStep >= 5 ? "text-emerald-400 font-bold" : "text-zinc-500"}>
