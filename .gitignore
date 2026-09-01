@@ -1,6 +1,10 @@
 # Docs kept out of the repo by team convention
 PRD.md
 PROJECT-PLAN.md
+docs/FIRST-FILL.md
+docs/INTEGRATION.md
+docs/M1-WEB3-EXECUTION.md
+docs/SYNTHETIC-ASSET-PROOF.md
 
 # Secrets — never commit
 .env
