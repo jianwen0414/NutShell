@@ -134,7 +134,37 @@ export interface DecodedOrder {
   underlyingToken: Address;
   optionBookAddress: Address;
   greeks: { delta: number; iv: number; gamma: number; theta: number; vega: number };
+  /**
+   * The untouched SDK order object, required for signing.
+   *
+   * ⚠️ This holds `bigint` values. `JSON.stringify` on a DecodedOrder THROWS.
+   * Every API route must pass the order through `toJsonSafe()` from
+   * `lib/errors.ts` before serialising it.
+   */
   raw: unknown;
+
+  // ── M1 additions (PRD §7 permits additions) ─────────────────────────────
+  /**
+   * Resolved option implementation: 'PUT', 'PUT_SPREAD', 'PHYSICAL_PUT',
+   * 'RANGER', … The live book carries nine, so `isCall === false` alone does
+   * NOT mean "vanilla put". See `isVanillaPut()` in lib/assets.ts.
+   */
+  implementationName: string;
+  implementationAddress: Address;
+  /** All strikes, 8dp. Length 1 = vanilla, 2 = spread, 3 = fly, 4 = condor. */
+  strikes: UsdPrice[];
+  /** True only for a single-strike, cash-settled, maker-short vanilla put. */
+  isVanillaPut: boolean;
+  collateralSymbol: string;
+  /** Decimals of `collateralToken` — the scale `availableAmount` uses. */
+  collateralDecimals: number;
+  /** Bounds the contracts the maker can back, so it bounds the premium. */
+  maxCollateralUsable: UsdcAmount;
+  hoursToExpiry: number;
+  /** Spot at decode time, used for the strike cross-check. */
+  spotAtDecode: UsdPrice;
+  /** |strike − spot| / spot. Drives the ASSET_UNRESOLVED cross-check. */
+  strikeDeviationPct: number;
 }
 
 export interface MarketSnapshot {
@@ -143,6 +173,22 @@ export interface MarketSnapshot {
   clockSkewSeconds: number;
   orderCount: number;
   fetchedAt: ISO8601;
+
+  // ── M1 additions ────────────────────────────────────────────────────────
+  /**
+   * `metadata.currentTime` — the feed's own clock, and the authoritative
+   * "now" for all TTL and deadline math. Never `Date.now()`.
+   *
+   * Measured: `lastUpdated` is NOT a staleness marker. It is a forward-dated
+   * quote-cycle anchor — every order's expiry equals `lastUpdated/1000 + 60`
+   * exactly — so it sits in the FUTURE by up to 55s.
+   */
+  feedNow: ISO8601;
+  /** currentTime − lastUpdated, seconds. Negative by design (see above). */
+  feedAgeSeconds: number;
+  /** currentTime − Date.now(), seconds. The real clock skew; measured ~0.5s. */
+  localClockSkewSeconds: number;
+  feedNowMs: number;
 }
 
 export type PositionStatus = "PENDING" | "OPEN" | "UNWOUND" | "HARVESTED" | "EXPIRED" | "FAILED";
@@ -165,6 +211,107 @@ export interface HedgePosition {
   closedAt?: ISO8601;
   realisedPnlUsdc?: UsdcAmount;
   wasDryRun: boolean;
+
+  // ── M1 additions ────────────────────────────────────────────────────────
+  /** Deployed option contract, read from the fill's `OrderFilled` event. */
+  optionAddress?: Address;
+  /** Approval tx, when this fill needed one. */
+  approvalTxHash?: TxHash;
+  /**
+   * Everything the executor selected, sized, and built — the audit trail.
+   *
+   * Optional because a position reconstructed from chain, or a fixture, has
+   * no plan behind it. Anything `executeHedge()` returns always carries one.
+   */
+  execution?: ExecutionPlan;
+}
+
+/**
+ * A position that definitely carries its execution plan — what
+ * `executeHedge()` always returns.
+ *
+ * `HedgePosition.execution` is optional because a fixture, or a position
+ * reconstructed from chain, honestly has no plan behind it. Anything the
+ * executor produces does, so the executor returns this narrower type and
+ * callers get the plan without a non-null assertion.
+ */
+export type ExecutedPosition = HedgePosition & { execution: ExecutionPlan };
+
+/**
+ * The inspectable record of what the executor did. Populated identically on a
+ * dry run and a live fill: on a dry run it IS the deliverable, on a live fill
+ * it is the audit trail.
+ */
+export interface ExecutionPlan {
+  dryRun: boolean;
+  selectedOrder: DecodedOrder;
+  snapshot: MarketSnapshot;
+  /** How many fetch→select rounds ran before an order qualified. */
+  selectionAttempts: number;
+  /** Candidates surviving each filter — explains a NO_FILLABLE_ORDER. */
+  funnel: SelectionFunnel;
+  premiumUsdc: UsdcAmount;
+  premiumRaw: string;
+  contracts: string;
+  contractsRaw: string;
+  /** 🔒 Exact allowance granted. Never MaxUint256 — PRD §14. */
+  approvalAmountRaw: string;
+  existingAllowanceRaw: string;
+  approvalRequired: boolean;
+  approvalTx: UnsignedTx | null;
+  fillTx: UnsignedTx;
+  /** Quote TTL when the transaction was built, on the feed clock. */
+  ttlAtBuildSeconds: number;
+  /** TTL at the moment of the fill, after the approval confirmed. */
+  ttlAtSignSeconds?: number;
+  buildLatencyMs: number;
+  buildStartedAtMs: number;
+  signerAddress?: Address;
+  balances?: { ethWei: string; collateralRaw: string; collateralSymbol: string };
+  gasEstimate?: { approve?: string; fill?: string } | null;
+  /** What the chain reported, from `OrderFilled`. Authoritative over ours. */
+  onChain?: {
+    optionAddress: Address;
+    premiumPaidRaw: string;
+    feeCollectedRaw: string;
+    referralFeePaidRaw: string;
+    gasUsed: string;
+    effectiveGasPriceWei: string;
+    blockNumber: number;
+  };
+  /** What settlement did, read from the option contract after expiry. */
+  settlement?: {
+    settlementPrice: UsdPrice;
+    payoutOwed: UsdcAmount;
+    inTheMoney: boolean;
+    optionSettled: boolean;
+    recovered: UsdcAmount;
+    /** Measured false: settlement is automatic and costs the buyer nothing. */
+    transactionRequired: boolean;
+  };
+  warnings: string[];
+}
+
+export interface UnsignedTx {
+  to: Address;
+  data: string;
+  value: string;
+  chainId: number;
+  description: string;
+}
+
+/** Candidate counts after each successive selection filter. */
+export interface SelectionFunnel {
+  fetched: number;
+  assetResolved: number;
+  vanillaPuts: number;
+  collateralSupported: number;
+  ttlOk: number;
+  expiryHorizonOk: number;
+  deltaBandOk: number;
+  liquidityOk: number;
+  affordable: number;
+  bestRejectedTtlSeconds: number | null;
 }
 
 export type AttestationMethod = "SELF_TX" | "EAS" | "REGISTRY" | "OFFCHAIN_ONLY";
@@ -187,7 +334,28 @@ export interface Attestation {
   baseScanUrl?: string;
   payload: AttestationPayload;
   createdAt: ISO8601;
+
+  // ── M1 additions ────────────────────────────────────────────────────────
+  /** Canonical `NSHv1|…` line, exactly as encoded into calldata — PRD §12. */
+  canonicalLine?: string;
+  /** Hex of `canonicalLine`; the tx `data` for SELF_TX. */
+  payloadHex?: string;
+  /** sha256 of `canonicalLine` — the receipt hash for OFFCHAIN_ONLY. */
+  payloadHash?: string;
+  /** Methods tried before this one succeeded, with why each failed. */
+  ladderAttempts?: { method: AttestationMethod; ok: boolean; error?: string }[];
+  /** True when nothing was broadcast (dry run, or no signer). */
+  wasDryRun?: boolean;
+  unsignedTx?: UnsignedTx;
 }
+
+/**
+ * An attestation produced by `attest()`, which always fills the M1 fields.
+ * The base `Attestation` leaves them optional so a fixture or an imported
+ * record can omit them honestly.
+ */
+export type CompleteAttestation = Attestation &
+  Required<Pick<Attestation, 'canonicalLine' | 'payloadHex' | 'payloadHash' | 'ladderAttempts' | 'wasDryRun'>>;
 
 export interface VaultState {
   driver: "SIMULATED" | "AAVE_V3" | "MOONWELL";

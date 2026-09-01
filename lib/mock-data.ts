@@ -168,12 +168,20 @@ export function vaultState(): VaultState {
 }
 
 export function marketSnapshot(): MarketSnapshot {
+  const feedNowMs = Date.now();
   return {
     prices: { ETH: "2443" },
-    lastUpdated: now(),
-    clockSkewSeconds: 11,
+    // The real feed's lastUpdated is a forward-dated quote-cycle anchor:
+    // every order's expiry is exactly lastUpdated/1000 + 60. Mirrored here so
+    // a fixture cannot teach anyone the wrong mental model.
+    lastUpdated: new Date(feedNowMs + 30_000).toISOString(),
+    clockSkewSeconds: 30,
     orderCount: 323,
     fetchedAt: now(),
+    feedNow: new Date(feedNowMs).toISOString(),
+    feedAgeSeconds: -30,
+    localClockSkewSeconds: 0,
+    feedNowMs,
   };
 }
 
@@ -196,6 +204,19 @@ export function decodedOrders(): DecodedOrder[] {
       optionBookAddress: "0x1bDff855d6811728acaDC00989e79143a2bdfDed",
       greeks: { delta: -0.0887, iv: 0.3111, gamma: 0.0048, theta: -3.8188, vega: 0.172 },
       raw: null,
+      // The PUT implementation, single strike, maker-short: the one
+      // instrument the agent buys. `isCall === false` alone is not enough —
+      // the live book carries PUT_SPREAD, PUT_FLY and PHYSICAL_PUT too.
+      implementationName: "PUT",
+      implementationAddress: "0x7355eb92dfb0503db558a70c10843618932ab290",
+      strikes: ["2400"],
+      isVanillaPut: true,
+      collateralSymbol: "USDC",
+      collateralDecimals: 6,
+      maxCollateralUsable: "10000",
+      hoursToExpiry: 168,
+      spotAtDecode: "2443",
+      strikeDeviationPct: 0.0176,
     },
   ];
 }

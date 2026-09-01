@@ -1,6 +1,7 @@
 import { EventBus, InMemoryJobStore } from "@/worker/index";
 import { newJob, runJob, type Job, type PipelineEvent } from "@/worker/pipeline";
 import { SimulatedVaultDriver } from "./vault";
+import { chainDeps, openHedgesForPolicy } from "./execution-bridge";
 import { loadEnv } from "./env";
 import type { AlertEvent } from "@/types";
 
@@ -60,6 +61,12 @@ export async function startVerification(
     store,
     vault: v,
     emit: (jobId, ev: PipelineEvent) => bus.emit(jobId, ev),
+    openHedges: openHedgesForPolicy,
+    // Present only when this process holds a signing key. In `next dev` that
+    // is normally the case, which is what lets the operator panel drive a
+    // real fill; on Vercel it is not, and the pipeline correctly stops at
+    // DECIDED rather than pretending to trade.
+    ...chainDeps(),
   }).catch(() => {
     // runJob records its own failure on the job and emits an error frame.
     // Nothing further to do here; the catch only stops an unhandled rejection.

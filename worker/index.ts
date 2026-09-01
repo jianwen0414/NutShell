@@ -1,5 +1,7 @@
 import type { ISO8601 } from "@/types";
 import { SimulatedVaultDriver } from '../lib/vault';
+import { chainDeps, openHedgesForPolicy } from '../lib/execution-bridge';
+import { installFileResolver } from '../lib/positions';
 import { resolveModels } from '../lib/gonka';
 import { loadEnv } from "../lib/env";
 import {
@@ -122,10 +124,19 @@ export function createWorker(store: InMemoryJobStore, bus: EventBus, opts: Worke
   const pollIntervalMs = opts.pollIntervalMs ?? 2_000;
   const staleAfterMs = opts.staleAfterMs ?? 5 * 60_000;
 
+  // M1's chain integration. `chainDeps()` returns nothing when no signing key
+  // is configured, so a keyless process still verifies and decides — it simply
+  // cannot trade, which is the correct behaviour rather than a degraded one.
+  const chain = chainDeps();
+
   const deps: PipelineDeps = {
     store,
     vault: new SimulatedVaultDriver(),
     emit: (jobId, ev) => bus.emit(jobId, ev),
+    // 🔒 One open hedge per asset (PRD 10.6), enforced in the decision from
+    // the real position store rather than only at the signing boundary.
+    openHedges: openHedgesForPolicy,
+    ...chain,
     ...opts.deps,
   };
 
@@ -161,6 +172,11 @@ export function createWorker(store: InMemoryJobStore, bus: EventBus, opts: Worke
     // non-Gonka fallback, so an unreachable router is fatal by design.
     const models = await resolveModels();
     log(`models: ${models.join(', ')}`);
+    log(
+      deps.executor
+        ? 'chain executor wired — this process CAN place real trades'
+        : 'no signing key: verification and decisions only, no trading',
+    );
     await recover();
     log('polling');
 
@@ -187,6 +203,8 @@ const isEntrypoint =
 
 if (isEntrypoint) {
   loadEnv();
+  // Let unwind/settle resolve a position by correlation id from the store.
+  installFileResolver();
   const store = new InMemoryJobStore();
   const bus = new EventBus();
   const controller = new AbortController();
