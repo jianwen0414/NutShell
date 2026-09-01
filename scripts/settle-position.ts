@@ -122,31 +122,35 @@ async function main(): Promise<void> {
   console.log('\n═══ ON-CHAIN STATE ═══');
   await probe(position.optionAddress);
 
-  if (!has('live')) {
-    console.log('\n(probe only — pass --live --confirm to settle for real)');
+  if (!has('record')) {
+    console.log('\n(probe only — pass --record to measure settlement and write the result)');
     return;
   }
-  if (!has('confirm')) {
-    console.error('\n✗ --live requires --confirm.');
-    process.exit(1);
-  }
 
-  console.log('\n═══ SETTLING ═══');
-  const before = await getSigningClient().erc20.getBalance(
-    position.execution.selectedOrder.collateralToken,
-    signerAddress() as string,
-  );
-  console.log(`  balance before : ${fromScaled(before, position.execution.selectedOrder.collateralDecimals)} USDC`);
-
+  // Settlement on this venue is automatic: the option settles itself against a
+  // Chainlink TWAP and the buyer sends nothing. So measuring costs no gas and
+  // needs no --live gate. If a future in-the-money position turns out to need
+  // a claim transaction, settlePosition() says so rather than sending one.
+  console.log('\n═══ MEASURING SETTLEMENT ═══');
   const settled = await settlePosition(cid, { position });
+  const s = settled.execution.settlement;
 
-  console.log(`  exit tx        : ${settled.exitTxHash} ${settled.exitTxHash ? basescanTxUrl(settled.exitTxHash) : ''}`);
-  console.log(`  status         : ${settled.status}`);
-  console.log(`  realised PnL   : ${settled.realisedPnlUsdc} USDC`);
-  for (const w of settled.execution.warnings.slice(-2)) console.log(`  ${w}`);
+  if (s) {
+    console.log(`  settlement price : $${s.settlementPrice}`);
+    console.log(`  strike           : $${settled.strike}`);
+    console.log(`  outcome          : ${s.inTheMoney ? 'IN THE MONEY' : 'OUT OF THE MONEY'}`);
+    console.log(`  payout owed      : ${s.payoutOwed} USDC`);
+    console.log(`  optionSettled    : ${s.optionSettled}`);
+    console.log(`  recovered        : ${s.recovered} USDC (measured balance delta)`);
+    console.log(`  tx required      : ${s.transactionRequired}`);
+  }
+  console.log(`  status           : ${settled.status}`);
+  console.log(`  realised PnL     : ${settled.realisedPnlUsdc} USDC`);
+  if (settled.exitTxHash) console.log(`  exit tx          : ${basescanTxUrl(settled.exitTxHash)}`);
+  for (const w of settled.execution.warnings.slice(-3)) console.log(`\n  ${w}`);
 
   savePosition(settled);
-  console.log('\n✓ settled and recorded — this is the MEASURED round-trip number for PRD §17 V6.');
+  console.log('\n✓ recorded — this is the MEASURED round-trip number for PRD §17 V6.');
 }
 
 main().catch((e) => {

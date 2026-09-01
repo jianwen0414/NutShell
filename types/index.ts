@@ -271,6 +271,24 @@ export interface ExecutionPlan {
   gasEstimate?: { approve?: string; fill?: string } | null;
   /** Non-fatal advisories — skipped gas estimate, low balance, and similar. */
   warnings: string[];
+  /**
+   * What settlement actually did, read from the option contract after expiry.
+   * Settlement on this venue is automatic and costs the buyer nothing, so
+   * `transactionRequired` is false for every case measured so far.
+   */
+  settlement?: {
+    /** Chainlink TWAP the option settled against, 8dp decimal string. */
+    settlementPrice: UsdPrice;
+    /** `calculatePayout(settlementPrice)` — what the buyer is owed. */
+    payoutOwed: UsdcAmount;
+    inTheMoney: boolean;
+    /** The contract's own `optionSettled` flag. */
+    optionSettled: boolean;
+    /** Measured collateral delta on the burner across settlement. */
+    recovered: UsdcAmount;
+    /** Whether the buyer had to send anything. Measured false. */
+    transactionRequired: boolean;
+  };
 }
 
 export interface UnsignedTx {

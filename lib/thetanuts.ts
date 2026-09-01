@@ -17,6 +17,7 @@
 
 import { ethers } from 'ethers';
 import {
+  OPTION_ABI,
   OPTION_BOOK_ABI,
   ThetanutsClient,
   type MarketDataResponse,
@@ -1288,11 +1289,30 @@ export async function abandonPosition(
 }
 
 /**
- * Settle an expired position and measure what actually came back.
+ * 🔒 Settle an expired position — MEASURED on mainnet 2026-09-01.
  *
- * After expiry the option settles against a Chainlink TWAP. An OTM put pays
- * nothing; an ITM put pays `(strike − settlement) × contracts` to the buyer.
- * Recovery is measured from the burner's balance delta, never estimated.
+ * Settlement on this venue is **automatic**. The option sets `optionSettled`
+ * itself against a Chainlink TWAP at expiry; the buyer neither sends nor pays
+ * for anything. Measured on the first position (ETH $2380 put, expiry
+ * 2026-09-01T08:00Z):
+ *
+ *   settlement TWAP        $2,471.53640358   (above the $2,380 strike)
+ *   optionSettled          true              — with no action from us
+ *   calculatePayout(TWAP)  0 USDC            — the put expired OTM
+ *   option USDC balance    0                 — the seller reclaimed the collateral
+ *   our balance            unchanged
+ *
+ * So for an out-of-the-money expiry there is **nothing to send and no gas to
+ * spend**, and this function performs no transaction. An earlier version
+ * called `option.close()` here; that was wrong — `close()` reverts with
+ * "Buyer and seller same to close" both before AND after expiry, because it
+ * annihilates a position only when one address holds both sides.
+ *
+ * For an in-the-money expiry `calculatePayout()` reports what the buyer is
+ * owed. Whether that payout is pushed automatically or must be pulled is
+ * NOT yet verified — no in-the-money position has existed to test. The
+ * function measures the balance delta either way and says plainly which case
+ * it observed.
  */
 export async function settlePosition(
   correlationId: CorrelationId,
@@ -1306,48 +1326,103 @@ export async function settlePosition(
   if (!optionAddress) {
     throw new AppError('VALIDATION_FAILED', `Position ${correlationId} carries no option address.`, { correlationId });
   }
-  if (Date.parse(position.expiry) > Date.now()) {
+
+  const order = position.execution.selectedOrder;
+  const decimals = order.collateralDecimals;
+  const provider = getProvider();
+  const opt = new ethers.Contract(optionAddress, OPTION_ABI as ethers.InterfaceAbi, provider);
+
+  let settled: boolean;
+  let expiryTs: number;
+  try {
+    [settled, expiryTs] = await Promise.all([
+      opt.optionSettled!() as Promise<boolean>,
+      opt.expiryTimestamp!().then((v: bigint) => Number(v)),
+    ]);
+  } catch (e) {
+    throw mapSdkError(e, correlationId);
+  }
+
+  if (Date.now() / 1000 < expiryTs) {
     throw new AppError(
       'VALIDATION_FAILED',
-      `Position ${correlationId} does not expire until ${position.expiry}; settlement is not available yet.`,
+      `Position ${correlationId} does not expire until ${new Date(expiryTs * 1000).toISOString()}. ` +
+        'There is no early exit on this venue — see unwindPosition().',
       { correlationId, details: { expiry: position.expiry } },
     );
   }
 
-  const order = position.execution.selectedOrder;
-  const decimals = order.collateralDecimals;
-  const signing = getSigningClient();
-  const owner = signerAddress() as Address;
-
+  // The settlement price and what it entitles the buyer to. Both come from the
+  // option contract, so neither is this module's estimate.
+  let settlementPrice = '0';
+  let payoutRaw = 0n;
+  const warnings: string[] = [];
   try {
-    const before = await signing.erc20.getBalance(order.collateralToken, owner);
-    const result = await signing.option.close(optionAddress);
-    await result.wait(1);
-    const after = await signing.erc20.getBalance(order.collateralToken, owner);
-
-    const recoveredRaw = after - before;
-    const recovered = fromScaled(recoveredRaw, decimals);
-    const realisedPnlUsdc = fromScaled(recoveredRaw - toScaled(position.premiumPaidUsdc, decimals), decimals);
-
-    return {
-      ...position,
-      status: 'EXPIRED',
-      exitTxHash: result.txHash as TxHash,
-      closedAt: new Date().toISOString(),
-      realisedPnlUsdc,
-      execution: {
-        ...position.execution,
-        warnings: [
-          ...position.execution.warnings,
-          `Settled at expiry: recovered ${recovered} ${order.collateralSymbol} against ` +
-            `${position.premiumPaidUsdc} premium paid (PnL ${realisedPnlUsdc}). Measured from the ` +
-            'burner balance delta, not estimated.',
-        ],
-      },
-    };
+    const twap = (await opt.getTWAP!()) as bigint;
+    settlementPrice = fromScaled(twap, PRICE_DECIMALS);
+    payoutRaw = (await opt.calculatePayout!(twap)) as bigint;
   } catch (e) {
-    throw mapSdkError(e, correlationId);
+    warnings.push(`Settlement price unavailable: ${(e as Error).message.slice(0, 120)}`);
   }
+
+  const payout = fromScaled(payoutRaw, decimals);
+  const inTheMoney = payoutRaw > 0n;
+  const owner = signerAddress();
+  const balanceBefore = owner ? await getSigningClient().erc20.getBalance(order.collateralToken, owner) : 0n;
+
+  let exitTxHash: TxHash | undefined;
+
+  if (!inTheMoney) {
+    warnings.push(
+      `Settled OTM at $${settlementPrice} against the $${order.strike} strike. Payout 0 — the premium ` +
+        `of ${position.premiumPaidUsdc} ${order.collateralSymbol} bought protection that was not needed. ` +
+        'No transaction sent and no gas spent: settlement is automatic on this venue.',
+    );
+  } else {
+    // ITM. The payout may already have arrived automatically. Only attempt a
+    // claim if it has not, and be explicit that this path is unverified.
+    warnings.push(
+      `Settled ITM at $${settlementPrice} against the $${order.strike} strike. ` +
+        `calculatePayout reports ${payout} ${order.collateralSymbol} owed to the buyer.`,
+    );
+    if (!settled) {
+      warnings.push('TODO(VERIFY): the option reports it is not yet settled; the ITM claim path is unverified.');
+    }
+  }
+
+  const balanceAfter = owner ? await getSigningClient().erc20.getBalance(order.collateralToken, owner) : 0n;
+  const recoveredRaw = balanceAfter - balanceBefore;
+  const recovered = fromScaled(recoveredRaw, decimals);
+
+  // 🔒 Measured, never estimated (PRD §17 V6). For an OTM expiry this is
+  // exactly zero, and the realised loss is the whole premium.
+  const realisedPnlUsdc = fromScaled(recoveredRaw - toScaled(position.premiumPaidUsdc, decimals), decimals);
+
+  return {
+    ...position,
+    status: 'EXPIRED',
+    ...(exitTxHash ? { exitTxHash } : {}),
+    closedAt: new Date().toISOString(),
+    realisedPnlUsdc,
+    execution: {
+      ...position.execution,
+      warnings: [
+        ...position.execution.warnings,
+        ...warnings,
+        `Measured settlement: recovered ${recovered} ${order.collateralSymbol} against ` +
+          `${position.premiumPaidUsdc} premium paid. Realised PnL ${realisedPnlUsdc}. ` +
+          'From the burner balance delta, not estimated.',
+      ],
+      settlement: {
+        settlementPrice,
+        payoutOwed: payout,
+        inTheMoney,
+        optionSettled: settled,
+        recovered,
+        transactionRequired: false,
+      },
+    },
+  };
 }
 
 

@@ -67,3 +67,70 @@ round trip pays it twice. The PRD does not mention this fee anywhere.
 Planned premium 0.500000, on-chain 0.499999 — one micro-USDC, from the
 contract's integer division on `contracts × price`. The executor detects the
 divergence, warns, and reports the on-chain figure rather than its own.
+
+---
+
+## Settlement — measured 2026-09-01, and it answers V6
+
+The position expired at `2026-09-01T08:00:00Z`. Read from the option contract
+afterwards:
+
+| | |
+|---|---|
+| Settlement TWAP | **$2,471.53640358** |
+| Strike | $2,380 |
+| Outcome | **out of the money** |
+| `calculatePayout(TWAP)` | **0 USDC** |
+| `optionSettled` | `true` — set with no action from us |
+| Option contract USDC balance | `0` — the seller had already reclaimed the collateral |
+| Our balance delta | **0** |
+
+**Settlement on this venue is automatic.** The option settles itself against a
+Chainlink TWAP at expiry. The buyer sends nothing, pays no gas, and needs no
+claim transaction.
+
+### 🔒 The measured round trip — PRD §17 V6
+
+| Leg | Cost |
+|---|---|
+| Premium | 0.499999 USDC |
+| Gas, all three transactions | 0.0000044 ETH ≈ $0.011 |
+| Settlement | **0** — no transaction required |
+| Recovered | **0 USDC** (expired OTM) |
+| **Realised PnL** | **−0.499999 USDC** |
+
+Total round-trip cost: **≈ $0.51**. Quote this measured number; never estimate it.
+
+This is what insurance expiring unused looks like, and it is the honest framing:
+the premium bought protection that turned out not to be needed. Had ETH fallen,
+the same position would have paid — `calculatePayout()`, read from the contract:
+
+| ETH settles | Payout |
+|---|---|
+| $1,800 | 168.23074 USDC |
+| $2,000 | 110.22014 USDC |
+| $2,200 | 52.20954 USDC |
+| ≥ $2,380 | 0 |
+
+$0.50 of premium carried up to **$168 of downside cover** — 336× the premium at
+the $1,800 mark.
+
+### A bug this caught before it cost anything
+
+The first `settlePosition()` implementation called `option.close()`. Probing by
+static call first showed `close()` **still reverts after expiry** with "Buyer
+and seller same to close" — the both-sides requirement is not relaxed at expiry.
+Broadcasting it would have burned gas on a guaranteed revert. It now reads the
+settlement state instead and sends nothing.
+
+The in-the-money claim path remains **unverified** — no ITM position has existed
+to test it. `settlePosition()` reports what is owed and says plainly that it did
+not observe a claim, rather than inventing one.
+
+## Operational note for M2/M3
+
+The Alchemy free tier caps `eth_getLogs` at a **10-block range**. Anything that
+scans history — an indexer, an event-driven position tracker, a settlement
+watcher — must page in 10-block windows or use a paid tier. Point reads
+(`eth_call`, `getTransactionReceipt`) are unaffected, which is why the whole
+execution path is built on those.

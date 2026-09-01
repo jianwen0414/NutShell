@@ -128,9 +128,17 @@ describe('queries', () => {
   });
 
   it('reports positions past expiry as settleable', () => {
-    const ready = settleablePositions();
-    expect(ready.map((p) => p.correlationId)).toContain('nsh_0000000000000002');
-    expect(ready.map((p) => p.correlationId)).not.toContain('nsh_0000000000000001');
+    // Pinned "now" — the fixtures carry real dates, so a wall-clock-dependent
+    // assertion here silently changes meaning as those dates pass.
+    const now = Date.parse('2026-08-31T12:00:00.000Z');
+    const ready = settleablePositions(now).map((p) => p.correlationId);
+    expect(ready).toContain('nsh_0000000000000002'); // expired 2020
+    expect(ready).not.toContain('nsh_0000000000000001'); // expires 2026-09-01
+  });
+
+  it('includes a position once its expiry has passed', () => {
+    const after = Date.parse('2026-09-01T08:00:01.000Z');
+    expect(settleablePositions(after).map((p) => p.correlationId)).toContain('nsh_0000000000000001');
   });
 });
 
