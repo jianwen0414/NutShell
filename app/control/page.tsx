@@ -700,7 +700,7 @@ export default function ControlPage() {
               type="password"
               value={operatorToken}
               onChange={(e) => setOperatorToken(e.target.value)}
-              placeholder="OPERATOR_TOKEN from .env"
+              placeholder="OPERATOR_TOKEN"
               className="w-full rounded-lg bg-[#050b12] border border-zinc-800 px-3 py-2 text-xs font-mono-code text-zinc-200 placeholder:text-zinc-600 focus:border-amber-700 focus:outline-none"
             />
           </div>
