@@ -362,12 +362,49 @@ export default function ConfigurationPage() {
                   </span>
                   <span className="text-[10px] bg-emerald-950 px-2 py-0.5 rounded font-bold">ALLOWED</span>
                 </div>
+                {/*
+                  Measured on mainnet, not assumed. A long put has NO early
+                  exit on this venue: BaseOption.close() reverts with "Buyer
+                  and seller same to close" unless one address holds BOTH
+                  sides, reclaimCollateral() is seller-only, and 0 of the live
+                  vanilla PUT quotes bid for puts, so there is nothing to sell
+                  into. Early premium recovery is 0%. Claiming otherwise here
+                  would be exactly the overclaim PRD 13.2 forbids.
+                */}
+                <div className="bg-[#050b12] p-3 rounded-xl border border-zinc-800 flex items-center justify-between text-zinc-400">
+                  <span className="flex items-center gap-2">
+                    <span className="text-zinc-500 font-bold">—</span>
+                    <span>Unwind / close a hedge early</span>
+                  </span>
+                  <span className="text-[10px] bg-zinc-900 px-2 py-0.5 rounded font-bold">
+                    NOT POSSIBLE
+                  </span>
+                </div>
                 <div className="bg-[#050b12] p-3 rounded-xl border border-emerald-900/40 flex items-center justify-between text-emerald-300">
                   <span className="flex items-center gap-2">
                     <span className="text-emerald-400 font-bold">✓</span>
-                    <span>Unwind / close existing hedges</span>
+                    <span>Abandon a hedge (stop protecting, let it lapse)</span>
                   </span>
                   <span className="text-[10px] bg-emerald-950 px-2 py-0.5 rounded font-bold">ALLOWED</span>
+                </div>
+                <div className="bg-[#050b12] p-3 rounded-xl border border-emerald-900/40 flex items-center justify-between text-emerald-300">
+                  <span className="flex items-center gap-2">
+                    <span className="text-emerald-400 font-bold">✓</span>
+                    <span>Settle a hedge at expiry (automatic, no gas)</span>
+                  </span>
+                  <span className="text-[10px] bg-emerald-950 px-2 py-0.5 rounded font-bold">ALLOWED</span>
+                </div>
+                <div className="rounded-xl border border-zinc-800 bg-[#03070c] p-3 text-[11px] leading-relaxed text-zinc-400">
+                  <span className="font-bold text-zinc-300">Why unwinding is not possible.</span>{" "}
+                  Measured against a real open position on Base mainnet:{" "}
+                  <code className="text-zinc-300">close()</code> reverts with &ldquo;Buyer and seller
+                  same to close&rdquo; — it annihilates a position only when one address holds both
+                  sides, and we hold the long side alone.{" "}
+                  <code className="text-zinc-300">reclaimCollateral()</code> is seller-only. And no
+                  live vanilla put quote bids for puts, so there is no secondary market to sell
+                  into. <span className="text-zinc-300">Early premium recovery is 0%.</span> The
+                  agent&rsquo;s real protection against a false alarm is the gate that runs{" "}
+                  <em>before</em> the money moves.
                 </div>
                 <div className="bg-[#050b12] p-3 rounded-xl border border-red-900/40 flex items-center justify-between text-red-400 opacity-80">
                   <span className="flex items-center gap-2">

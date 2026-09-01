@@ -180,6 +180,12 @@ export default function ControlPage() {
   
   const [history, setHistory] = useState<HistoryItem[]>(INITIAL_HISTORY);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  /**
+   * Operator token for the mutating routes. Held only in component state, never
+   * persisted — every operator endpoint checks it server-side against
+   * OPERATOR_TOKEN, so an empty box simply means those actions 401.
+   */
+  const [operatorToken, setOperatorToken] = useState("");
 
   const verificationResultRef = useRef<HTMLDivElement | null>(null);
 
@@ -670,25 +676,85 @@ export default function ControlPage() {
           </div>
 
           <p className="text-xs text-zinc-300 font-sans leading-relaxed">
-            Emergency override actions to instantly interrupt active execution pipelines, liquidate open hedges, or resolve active cases.
+            Emergency override actions to interrupt an active execution pipeline, abandon an open
+            hedge, or resolve an active case.
           </p>
+          {/*
+            There is deliberately no "unwind" here. Measured on mainnet, a long
+            put has no early exit on this venue and premium recovery is 0%, so a
+            button claiming to broadcast an exit order would be describing a
+            transaction that cannot exist.
+          */}
+          <p className="text-[11px] text-amber-300/80 font-sans leading-relaxed border-l-2 border-amber-700/50 pl-3">
+            <span className="font-bold">Note.</span> An open hedge cannot be unwound early on this
+            venue — there is no exit and no bid to sell into, so premium recovery is 0%.{" "}
+            <span className="text-amber-200">Abandon</span> records the decision to stop protecting
+            and lets the position lapse; it sends no transaction, because none is possible.
+          </p>
+
+          <div className="pt-1">
+            <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-mono-code mb-1">
+              Operator token — required by every action below
+            </label>
+            <input
+              type="password"
+              value={operatorToken}
+              onChange={(e) => setOperatorToken(e.target.value)}
+              placeholder="OPERATOR_TOKEN from .env"
+              className="w-full rounded-lg bg-[#050b12] border border-zinc-800 px-3 py-2 text-xs font-mono-code text-zinc-200 placeholder:text-zinc-600 focus:border-amber-700 focus:outline-none"
+            />
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
             <button
               onClick={() => {
-                showToast("🛑 EMERGENCY STOP: Interrupted active execution process.");
+                // Local UI state only: this pauses what the operator sees. It
+                // does not reach into a transaction already in flight, and it
+                // does not claim to.
+                setAgentStatus("PAUSED");
+                showToast("🛑 AGENT PAUSED locally. An in-flight transaction cannot be recalled.");
               }}
               className="rounded-xl bg-red-950/90 hover:bg-red-900 text-red-300 p-3 border border-red-800/60 font-bold text-xs transition-all text-center cursor-pointer shadow-[0_0_12px_rgba(239,68,68,0.2)]"
             >
-              🛑 EMERGENCY STOP
+              🛑 PAUSE AGENT
             </button>
             <button
-              onClick={() => {
-                showToast("⚡ EMERGENCY UNWIND: Broadcasted exit order on Thetanuts OptionBook.");
+              onClick={async () => {
+                // Real call. It abandons the oldest open position: records the
+                // decision to stop protecting and lets it lapse. No transaction
+                // is sent, because on this venue none is possible.
+                try {
+                  const list = await fetch("/api/positions?status=OPEN").then((r) => r.json());
+                  const open = Array.isArray(list) ? list[0] : null;
+                  if (!open) {
+                    showToast("No open hedge to abandon.");
+                    return;
+                  }
+                  const res = await fetch(`/api/hedge/${open.correlationId}/unwind`, {
+                    method: "POST",
+                    headers: {
+                      "content-type": "application/json",
+                      authorization: `Bearer ${operatorToken}`,
+                    },
+                    body: JSON.stringify({ reason: "ROLLBACK" }),
+                  });
+                  const data = await res.json();
+                  if (!res.ok) {
+                    showToast(`✕ ${data?.error?.code ?? res.status}: ${data?.error?.message ?? "failed"}`);
+                    return;
+                  }
+                  showToast(
+                    `⚑ ABANDONED ${open.asset} hedge — recovered ${data?.outcome?.recoveredUsdc ?? "0"} USDC, ` +
+                      `no transaction sent. Realised ${data?.realisedPnlUsdc ?? "-"} USDC.`,
+                  );
+                } catch (e) {
+                  showToast(`✕ ${e instanceof Error ? e.message : "request failed"}`);
+                }
               }}
               className="rounded-xl bg-amber-950/90 hover:bg-amber-900 text-amber-300 p-3 border border-amber-800/60 font-bold text-xs transition-all text-center cursor-pointer"
+              title="Records the decision to stop protecting. Sends no transaction — early exit is impossible on this venue."
             >
-              ⚡ EMERGENCY UNWIND
+              ⚑ ABANDON HEDGE
             </button>
             <button
               onClick={() => {

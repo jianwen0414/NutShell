@@ -3,6 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 const navItems = [
   { href: "/", label: "Dashboard" },
@@ -11,8 +12,31 @@ const navItems = [
   { href: "/portfolio", label: "Portfolio" },
 ];
 
+/** The slice of /api/health this bar shows. */
+interface Status {
+  rpc?: { reachable: boolean };
+  book?: { orderCount: number | null; vanillaPutCount: number | null };
+  burner?: { address: string | null; canSign: boolean };
+  limits?: { quoteMinTtlSeconds: number };
+}
+
 export function Navigation() {
   const pathname = usePathname();
+  // Real chain and book state rather than fixed strings. A hardcoded burner
+  // address in the chrome is the kind of detail that looks authoritative and
+  // is wrong for the whole life of the demo.
+  const [status, setStatus] = useState<Status | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((d) => live && setStatus(d))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
 
   return (
     <header className="sticky top-0 z-50 border-b border-[#1e2433] bg-[#090b10]/95 backdrop-blur-md">
@@ -21,18 +45,40 @@ export function Navigation() {
         <div className="mx-auto flex max-w-[1560px] items-center justify-between">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1.5 text-zinc-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  status?.rpc?.reachable ? "bg-emerald-500" : "bg-zinc-600"
+                }`}
+              ></span>
               BASE MAINNET
             </span>
             <span className="text-zinc-600">|</span>
-            <span className="text-zinc-400">GONKA AI ROUTER: CONNECTED</span>
+            <span className="text-zinc-400">
+              BOOK: {status?.book?.vanillaPutCount ?? "—"} PUTS
+            </span>
             <span className="text-zinc-600">|</span>
-            <span className="text-amber-400/90 font-medium">SIMULATED ENVIRONMENT</span>
+            {/*
+              🔒 PRD §13.2. "Simulated environment" was wrong in the dangerous
+              direction: the vault's yield is modelled, but the premiums are
+              paid with real USDC on Base mainnet. Say both.
+            */}
+            <span className="text-amber-400/90 font-medium">
+              SIMULATED VAULT · REAL TRADES
+            </span>
           </div>
           <div className="flex items-center gap-3">
-            <span className="text-zinc-400">BURNER: <span className="text-zinc-300">0x8bbF...a975</span></span>
+            <span className="text-zinc-400">
+              BURNER:{" "}
+              <span className="text-zinc-300">
+                {status?.burner?.address
+                  ? `${status.burner.address.slice(0, 6)}…${status.burner.address.slice(-4)}`
+                  : "—"}
+              </span>
+            </span>
             <span className="text-zinc-600">|</span>
-            <span className="text-zinc-400">TTL GUARD: 60s</span>
+            <span className="text-zinc-400">
+              TTL GUARD: {status?.limits?.quoteMinTtlSeconds ?? 60}s
+            </span>
           </div>
         </div>
       </div>
