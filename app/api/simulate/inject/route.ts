@@ -67,10 +67,19 @@ export async function POST(request: Request) {
     ...(scenarioName ? { metadata: { scenario: scenarioName } } : {}),
   };
 
+  // Stage 02 runs unless the operator explicitly turns it off. Bypassing is
+  // how the verification layer gets demonstrated on its own: the on-chain
+  // evidence is truthful about the real chain, so a scripted scenario about an
+  // event that is not happening gets measured as not happening.
+  const skipInvestigation = body?.skipInvestigation === true;
+
   try {
     // Live trades stay opt-in. Nothing reaches the book unless the caller
     // asks for it explicitly.
-    await startVerification(alert, { dryRun: body?.dryRun !== false });
+    await startVerification(alert, {
+      dryRun: body?.dryRun !== false,
+      skipInvestigation,
+    });
   } catch (e) {
     return errorJson(
       "INTERNAL",
@@ -85,6 +94,9 @@ export async function POST(request: Request) {
       status: "QUEUED",
       scenario: scenarioName ?? null,
       dryRun: body?.dryRun !== false,
+      // Echoed back so a caller cannot end up displaying an evidence-free run
+      // without knowing it was evidence-free by choice.
+      skipInvestigation,
       streamUrl: `/api/verify/${correlationId}/stream`,
     },
     correlationId,

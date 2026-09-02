@@ -51,15 +51,33 @@ export const vault = () => runtime().vault;
  */
 export async function startVerification(
   alert: AlertEvent,
-  opts: { dryRun?: boolean } = {},
+  opts: {
+    dryRun?: boolean;
+    /**
+     * Skip stage 02 and score the claim on its text alone.
+     *
+     * Operator-only, and off by default. It exists so the pre-investigation
+     * behaviour stays reachable: the on-chain evidence is truthful about the
+     * real chain, so a scripted scenario describing an event that is not
+     * happening will be measured as not happening, and the verdict reflects
+     * that. Bypassing is how you demonstrate the verification layer on its own.
+     *
+     * Anything using this MUST say so in the UI. A run that skipped the
+     * evidence and a run that gathered none look identical otherwise, and
+     * presenting the first as the second would overclaim.
+     */
+    skipInvestigation?: boolean;
+  } = {},
 ): Promise<Job> {
   const { store, bus, vault: v } = runtime();
   const job = newJob(alert, { dryRun: opts.dryRun ?? true });
+  job.investigationSkipped = opts.skipInvestigation === true;
   await store.save(job);
 
   void runJob(job, {
     store,
     vault: v,
+    ...(opts.skipInvestigation ? { skipInvestigation: true } : {}),
     emit: (jobId, ev: PipelineEvent) => bus.emit(jobId, ev),
     openHedges: openHedgesForPolicy,
     // Present only when this process holds a signing key. In `next dev` that

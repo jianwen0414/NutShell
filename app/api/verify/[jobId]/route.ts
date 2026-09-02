@@ -23,6 +23,9 @@ export async function GET(
       jobId: job.jobId,
       status: job.status,
       alert: job.alert,
+      evidence: job.evidence,
+      // Distinguishes "we did not look" from "we looked and found nothing".
+      investigationSkipped: job.investigationSkipped === true,
       verification: job.verification,
       decision: job.decision,
       position: job.position,

@@ -2,9 +2,11 @@ import type {
   Attestation,
   ConsensusMetrics,
   ErrorEnvelope,
+  EvidencePacket,
   HedgeDecision,
   HedgePosition,
   ISO8601,
+  InvestigationCheck,
   JobStatus,
   JobView,
   ModelVerdict,
@@ -12,11 +14,17 @@ import type {
 } from "@/types";
 import { AppError, asAppError } from '../lib/errors';
 import { verifyThreat } from '../lib/gonka';
+import { evidenceHeadline, investigate } from '../lib/investigate';
 import { decide, thresholdsFromEnv, type PolicyState, type Thresholds } from '../lib/policy';
 import type { VaultDriver } from '../lib/vault';
 
 /**
- * alert → verify → decide → execute → attest.
+ * alert → investigate → verify → decide → execute → attest.
+ *
+ * Investigation is stage 02 and runs before the models, so the claim is scored
+ * against measured chain state rather than against its own wording alone. It
+ * is strictly additive: it never throws, and when it produces nothing the
+ * verification prompt is byte-identical to the build that preceded it.
  *
  * This runs in the long-lived worker, never in a Next.js route. A four
  * call LLM pipeline plus a Base transaction blows straight through Vercel's
@@ -39,6 +47,14 @@ export interface Job extends JobView {
    * Only operator-injected and webhook alerts are eligible.
    */
   tradeEligible: boolean;
+  /**
+   * True when this run deliberately skipped stage 02.
+   *
+   * Recorded on the job, not just passed to the pipeline, because the UI has to
+   * be able to tell "we did not look" apart from "we looked and found nothing".
+   * Those produce the same empty evidence and mean opposite things.
+   */
+  investigationSkipped?: boolean;
   attempts: number;
   updatedAt: ISO8601;
 }
@@ -87,6 +103,9 @@ export interface Attestor {
 /** SSE frames The UI renders these verbatim and invents no states. */
 export type PipelineEvent =
   | { event: 'status'; data: { status: JobStatus; step?: string; modelsTotal?: number } }
+  /** Stage 02, one frame per check as it lands, then the assembled packet. */
+  | { event: 'check'; data: InvestigationCheck }
+  | { event: 'evidence'; data: EvidencePacket }
   | { event: 'verdict'; data: ModelVerdict }
   | { event: 'consensus'; data: ConsensusMetrics }
   | { event: 'decision'; data: HedgeDecision }
@@ -98,9 +117,18 @@ export type PipelineEvent =
 /** Layer 1 + 2. Injected so the pipeline is testable without the network. */
 export type Verifier = typeof verifyThreat;
 
+/** Stage 02. Injected so the pipeline stays testable without a chain. */
+export type Investigator = typeof investigate;
+
 export interface PipelineDeps {
   store: JobStore;
   vault: VaultDriver;
+  investigator?: Investigator;
+  /**
+   * Skip stage 02 entirely. Set for A/B measurement against the pre-evidence
+   * behaviour; the verification path is byte-identical when evidence is absent.
+   */
+  skipInvestigation?: boolean;
   verify?: Verifier;
   executor?: Executor;
   attestor?: Attestor;
@@ -127,13 +155,37 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
   const now = deps.now ?? (() => new Date().toISOString());
   const t = deps.thresholds ?? thresholdsFromEnv();
 
+  /**
+   * 🔒 Emitting is presentation. It must never fail the pipeline.
+   *
+   * Measured, and the reason this wrapper exists: the first run to reach
+   * EXECUTING through the SSE route threw "Do not know how to serialize a
+   * BigInt" while encoding the `position` frame — the HedgePosition carries the
+   * raw SDK order, which is full of bigints. The throw propagated out of
+   * `deps.emit`, was caught by the outer handler, and marked the job FAILED
+   * *after* the decision had been made and the position built.
+   *
+   * A display bug must not be able to do that. If money has moved, the record
+   * of it matters more than the animation.
+   */
+  const emit = (ev: PipelineEvent) => {
+    try {
+      deps.emit?.(job.jobId, ev);
+    } catch (e) {
+      console.error(
+        `[pipeline] ${job.jobId} could not emit '${ev.event}' frame; continuing: ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  };
+
   // Persist before advancing. Every transition is written before the work
   // that follows it starts, so a crash leaves a status that says exactly how
   // far it got rather than a job that silently rewinds.
   const advance = async (status: JobStatus, patch: Partial<Job> = {}) => {
     Object.assign(job, patch, { status, updatedAt: now() });
     await deps.store.save(job);
-    deps.emit?.(job.jobId, { event: 'status', data: { status } });
+    emit({ event: 'status', data: { status } });
     return job;
   };
 
@@ -142,32 +194,83 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
     const envelope = err.toEnvelope(job.jobId);
     Object.assign(job, { status: 'FAILED' as JobStatus, error: envelope, updatedAt: now() });
     await deps.store.save(job);
-    deps.emit?.(job.jobId, { event: 'error', data: envelope });
+    emit({ event: 'error', data: envelope });
     return job;
   };
 
   try {
     job.attempts += 1;
 
-    // ── 1. Verify ─────────────────────────────────────────────────────────
+    // ── 1. Investigate ────────────────────────────────────────────────────
+    // Stage 02 runs BEFORE the models so its findings can be scored alongside
+    // the claim rather than bolted on afterwards.
+    //
+    // 🔒 It cannot fail this job. `investigate` never throws, and the catch
+    // below covers even a programming error inside it: the pipeline then
+    // proceeds with `evidence` undefined, which makes the analyst prompt
+    // byte-identical to the pre-stage-02 build. Evidence is an upgrade to
+    // verification, never a precondition for it.
+    //
+    // No new JobStatus. PRD §7 freezes that union and `lib/state-machine.ts`
+    // enumerates the legal transitions, so this reports as a step inside
+    // VERIFYING rather than inventing an INVESTIGATING state the UI and the
+    // state machine would both have to learn.
     await advance('VERIFYING');
-    deps.emit?.(job.jobId, {
+
+    let evidence: EvidencePacket | undefined;
+    if (deps.skipInvestigation) {
+      // Say so on the wire. A bypassed run must never be mistaken for one that
+      // investigated and turned up nothing.
+      job.investigationSkipped = true;
+      emit({
+        event: 'status',
+        data: { status: 'VERIFYING', step: 'investigation-skipped' },
+      });
+    } else {
+      emit({
+        event: 'status',
+        data: { status: 'VERIFYING', step: 'investigating' },
+      });
+      try {
+        const run = deps.investigator ?? investigate;
+        evidence = await run(job.alert, {
+          onCheck: (check) => emit({ event: 'check', data: check }),
+        });
+        job.evidence = evidence;
+        await deps.store.save(job);
+        emit({ event: 'evidence', data: evidence });
+        console.info(
+          `[pipeline] ${job.jobId} investigated in ${evidence.totalLatencyMs}ms — ${evidenceHeadline(evidence)}`,
+        );
+      } catch (e) {
+        // Belt and braces over `investigate`'s own guarantee.
+        console.warn(
+          `[pipeline] ${job.jobId} investigation threw, continuing without evidence: ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+        evidence = undefined;
+      }
+    }
+
+    // ── 2. Verify ─────────────────────────────────────────────────────────
+    emit({
       event: 'status',
       data: { status: 'VERIFYING', step: 'layer1', modelsTotal: 3 },
     });
 
     const verify = deps.verify ?? verifyThreat;
     const verification = await verify(job.alert, {
+      ...(evidence ? { evidence } : {}),
       // Each verdict reaches the UI as it lands rather than all at the end.
-      onVerdict: (v) => v && deps.emit?.(job.jobId, { event: 'verdict', data: v }),
+      onVerdict: (v) => v && emit({ event: 'verdict', data: v }),
       onStage: (stage) =>
-        deps.emit?.(job.jobId, { event: 'status', data: { status: 'VERIFYING', step: stage } }),
+        emit({ event: 'status', data: { status: 'VERIFYING', step: stage } }),
     });
 
     await advance('VERIFIED', { verification });
-    deps.emit?.(job.jobId, { event: 'consensus', data: verification.consensus });
+    emit({ event: 'consensus', data: verification.consensus });
 
-    // ── 2. Decide ─────────────────────────────────────────────────────────
+    // ── 3. Decide ─────────────────────────────────────────────────────────
     const vaultState = await deps.vault.getState();
     const policyState: PolicyState = {
       premiumReserveUsdc: vaultState.premiumReserveUsdc,
@@ -180,19 +283,19 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
 
     const decision = decide(job.alert, verification, policyState, t);
     await advance('DECIDED', { decision });
-    deps.emit?.(job.jobId, { event: 'decision', data: decision });
+    emit({ event: 'decision', data: decision });
 
-    // ── 3. Stop here unless this is a real, eligible hedge ────────────────
+    // ── 4. Stop here unless this is a real, eligible hedge ────────────────
     if (!job.tradeEligible) {
       // Not a failure: the public path is verification only, and the
       // verdict it produced is the whole deliverable.
-      return finish(job, deps, decision.tier === 'REJECT' ? 'REJECTED' : 'VERIFIED', now);
+      return finish(job, deps, decision.tier === 'REJECT' ? 'REJECTED' : 'VERIFIED', now, emit);
     }
     if (decision.tier === 'REJECT') {
-      return finish(job, deps, 'REJECTED', now);
+      return finish(job, deps, 'REJECTED', now, emit);
     }
     if (decision.tier !== 'HEDGE_SMALL' && decision.tier !== 'HEDGE_FULL') {
-      return finish(job, deps, 'DECIDED', now);
+      return finish(job, deps, 'DECIDED', now, emit);
     }
     if (!deps.executor) {
       throw new AppError(
@@ -202,7 +305,7 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
       );
     }
 
-    // ── 4. Execute ────────────────────────────────────────────────────────
+    // ── 5. Execute ────────────────────────────────────────────────────────
     // The reserve is debited BEFORE the fill. If the fill then fails, the
     // ledger holds a spend that did not happen, which a reconciliation can
     // see and correct. The reverse order risks spending money the vault never
@@ -215,22 +318,22 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
     await advance('EXECUTING');
     const position = await deps.executor.execute(decision, { dryRun: job.dryRun });
     await advance('EXECUTED', { position });
-    deps.emit?.(job.jobId, { event: 'position', data: position });
+    emit({ event: 'position', data: position });
 
-    // ── 5. Attest ─────────────────────────────────────────────────────────
+    // ── 6. Attest ─────────────────────────────────────────────────────────
     // A failed attestation never fails the hedge. The position is real
     // and open; the attestation is a record of why it was opened.
     if (deps.attestor) {
       try {
         const attestation = await deps.attestor.attest(verification, decision, position);
         await advance('ATTESTED', { attestation });
-        deps.emit?.(job.jobId, { event: 'attestation', data: attestation });
+        emit({ event: 'attestation', data: attestation });
       } catch {
         await advance('EXECUTED');
       }
     }
 
-    deps.emit?.(job.jobId, { event: 'done', data: { status: job.status } });
+    emit({ event: 'done', data: { status: job.status } });
     return job;
   } catch (e) {
     return fail(e);
@@ -242,11 +345,13 @@ async function finish(
   deps: PipelineDeps,
   status: JobStatus,
   now: () => ISO8601,
+  /** The caller's guarded emitter, so a display failure cannot fail the job. */
+  emit: (ev: PipelineEvent) => void,
 ): Promise<Job> {
   Object.assign(job, { status, updatedAt: now() });
   await deps.store.save(job);
-  deps.emit?.(job.jobId, { event: 'status', data: { status } });
-  deps.emit?.(job.jobId, { event: 'done', data: { status } });
+  emit({ event: 'status', data: { status } });
+  emit({ event: 'done', data: { status } });
   return job;
 }
 

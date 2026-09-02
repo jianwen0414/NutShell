@@ -46,6 +46,116 @@ export interface AlertEvent {
   metadata?: Record<string, string>;
 }
 
+// ─── Stage 02 — Investigation (deterministic, pre-verification) ────────────
+//
+// Everything in this block is MEASURED from Base mainnet, DeFiLlama and the
+// Chainlink feeds. No model touches it. It exists so that layer 1 scores a
+// claim against chain state rather than against the wording of a tweet.
+
+/**
+ * What one check concluded about the claim it was run against.
+ *
+ * UNAVAILABLE and INCONCLUSIVE are deliberately distinct. "The check could not
+ * run" and "the check ran and found nothing" are different facts, and
+ * collapsing them would let a broken RPC read as evidence of innocence.
+ */
+export type EvidenceStance =
+  | "CORROBORATES"
+  | "CONTRADICTS"
+  | "INCONCLUSIVE"
+  | "UNAVAILABLE";
+
+export type InvestigationCheckId =
+  | "BALANCE_DELTA"
+  | "TRANSFER_ACTIVITY"
+  | "CONTRACT_STATE"
+  | "DEX_LIQUIDITY"
+  | "ORACLE_DIVERGENCE"
+  | "PEG_STABILITY"
+  | "PROTOCOL_TVL";
+
+export type EvidenceSource = "BASE_RPC" | "DEFILLAMA" | "CHAINLINK" | "DEX";
+
+export interface InvestigationCheck {
+  id: InvestigationCheckId;
+  /** Human label, shown in the UI. */
+  title: string;
+  stance: EvidenceStance;
+  /** One line, written for a human. Derived from `facts`, never invented. */
+  summary: string;
+  /** The numbers behind the summary, so no statement is unfalsifiable. */
+  facts: Record<string, string | number | boolean>;
+  /** Exactly what was queried — the audit trail for the summary above. */
+  method: string;
+  source: EvidenceSource;
+  /** What this check was run against, when it had a specific target. */
+  target?: string;
+  latencyMs: number;
+  /** Populated only when `stance` is UNAVAILABLE. Says why, never guesses. */
+  error?: string;
+}
+
+/** Something named in the alert text that we can actually go and measure. */
+export interface ResolvedTarget {
+  kind: "PROTOCOL" | "TOKEN" | "ADDRESS" | "ASSET";
+  name: string;
+  address?: Address;
+  /** Slug for api.llama.fi. Verified to resolve before it enters the registry. */
+  defillamaSlug?: string;
+  /** Which of the six tradeable assets this maps to, when it maps to one. */
+  asset?: string;
+  /** The exact substring of the alert that produced this target. */
+  matchedOn: string;
+  /**
+   * How sure we are that this entity is the one the claim is about.
+   *
+   * EXACT: a literal address, or a name only this entity goes by.
+   * BROAD: a catch-all word like "bridge". We resolved something checkable,
+   * but the claim may be describing a different instance of the same kind.
+   *
+   * 🔒 This gates what a healthy reading is allowed to conclude. Measuring the
+   * canonical Base bridge and finding it intact does NOT contradict "a
+   * cross-chain bridge on Base was drained" — it may simply be a different
+   * bridge. A BROAD target can corroborate, never contradict.
+   */
+  confidence?: "EXACT" | "BROAD";
+  /**
+   * True when this address custodies enough of the asset for a balance delta
+   * to mean anything. Measured: Aave's v3 Pool holds ~114 USDC directly (the
+   * reserves sit in aTokens), so its raw balance is NOT a proxy for its TVL.
+   */
+  custodial?: boolean;
+}
+
+export interface EvidencePacket {
+  correlationId: CorrelationId;
+  targets: ResolvedTarget[];
+  checks: InvestigationCheck[];
+  /** Deterministic tallies. Counted, never judged. */
+  corroborating: number;
+  contradicting: number;
+  inconclusive: number;
+  unavailable: number;
+  /** Chain head every RPC read was anchored to. */
+  blockNumber: number;
+  blockTimestamp: ISO8601;
+  investigatedAt: ISO8601;
+  totalLatencyMs: number;
+  /**
+   * True when the claim named nothing checkable on Base. This is itself
+   * evidence — a report with no falsifiable specifics — and is reported as
+   * such rather than hidden.
+   */
+  noTargetResolved: boolean;
+  /** True when the stage hit its wall-clock budget and cut checks short. */
+  budgetExhausted: boolean;
+  /**
+   * The block handed to layer 1, already size-capped. `checks` is the full
+   * audit copy; this is the part the models actually read.
+   */
+  promptBlock: string;
+}
+
 export type Stance = "REAL" | "FAKE" | "UNCERTAIN";
 export type ModelRole = "ANALYST" | "PROSECUTOR" | "SKEPTIC" | "JUDGE" | "SYNTHESIZER";
 
@@ -405,6 +515,12 @@ export interface JobView {
   jobId: CorrelationId;
   status: JobStatus;
   alert: AlertEvent;
+  /**
+   * Stage 02. Produced before verification and fed into it, so it is job-level
+   * rather than part of the verification result: the evidence exists even when
+   * verification later fails at quorum.
+   */
+  evidence?: EvidencePacket;
   verification?: VerificationResult;
   decision?: HedgeDecision;
   position?: HedgePosition;

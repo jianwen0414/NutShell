@@ -4,6 +4,7 @@ import { config } from "@/lib/config";
 import { toJsonSafe } from "@/lib/errors";
 import { healthCheck } from "@/lib/thetanuts";
 import { registrySummary } from "@/lib/assets";
+import { investigationHealth, investigationConfig, LOG_WINDOW_BLOCKS } from "@/lib/investigate";
 
 /**
  * PRD §9.6 — "how a failure gets diagnosed in ten seconds instead of three
@@ -20,7 +21,17 @@ export async function GET() {
   const correlationId = newCorrelationId();
 
   try {
-    const h = await healthCheck();
+    // Stage 02's dependencies are checked alongside the book's, and
+    // deliberately do NOT gate `status`. A degraded investigation costs the
+    // verification some evidence; it never stops a hedge, so reporting the
+    // whole system as down because DeFiLlama is slow would be wrong.
+    const [h, inv] = await Promise.all([
+      healthCheck(),
+      investigationHealth().catch((e) => ({
+        archiveReads: false, logWindow: false, defillama: false,
+        errors: [`investigation health check threw: ${e instanceof Error ? e.message : String(e)}`],
+      })),
+    ]);
     const skewOk = h.clockSkewWithinLimit === true;
     const ok = h.rpcOk && h.bookOk && skewOk && h.errors.length === 0;
 
@@ -66,6 +77,22 @@ export async function GET() {
         registry: {
           assets: registrySummary().assets,
           feedCount: registrySummary().feedCount,
+        },
+        investigation: {
+          // Stage 02. Degraded here means the models get less evidence, not
+          // that the pipeline stops.
+          status:
+            inv.archiveReads && inv.logWindow && inv.defillama
+              ? "ok"
+              : inv.archiveReads || inv.logWindow || inv.defillama
+                ? "degraded"
+                : "down",
+          archiveReads: inv.archiveReads,
+          logWindowBlocks: LOG_WINDOW_BLOCKS + 1,
+          logWindowAccepted: inv.logWindow,
+          defillamaReachable: inv.defillama,
+          budgetMs: investigationConfig.budgetMs,
+          errors: inv.errors,
         },
         errors: h.errors,
       }),

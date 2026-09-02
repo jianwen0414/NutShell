@@ -27,6 +27,7 @@ import type {
   AlertEvent,
   Attestation,
   ConsensusMetrics,
+  EvidencePacket,
   HedgeDecision,
   HedgePosition,
   VerificationResult,
@@ -143,6 +144,12 @@ function harness(over: Partial<PipelineDeps> = {}) {
   const deps: PipelineDeps = {
     store: wrapped, vault, verify: fakeVerify(), thresholds: T, now: () => NOW,
     emit: (_id, ev) => events.push(ev),
+    // These tests are about the pipeline's control flow, not about stage 02.
+    // Left on, every case here would make live calls to Base, Chainlink and
+    // DeFiLlama, turning a deterministic unit test into a network test.
+    // Stage 02's own behaviour is covered by tests/investigate.test.ts and by
+    // the dedicated cases below, which stub the investigator explicitly.
+    skipInvestigation: true,
     ...over,
   };
   return { deps, saves, events, vault, store };
@@ -329,6 +336,171 @@ async function main() {
       ['nsh_old'],
       'should skip the fresh job and the finished one',
     );
+  });
+
+  // ── Stage 02 cannot break stage 03 ──────────────────────────────────────
+  // The single most important property of the investigation stage: it is an
+  // upgrade to verification, never a precondition for it. These stub the
+  // investigator rather than skipping it, so the wiring itself is exercised.
+  console.log('\nstage 02 — investigation');
+
+  const packet = (over: Partial<EvidencePacket> = {}): EvidencePacket => ({
+    correlationId: 'nsh_0000000000000000',
+    targets: [{ kind: 'PROTOCOL', name: 'Morpho', matchedOn: 'morpho', confidence: 'EXACT' }],
+    checks: [{
+      id: 'BALANCE_DELTA', title: 'Custodied balance vs 1h / 24h ago', stance: 'CORROBORATES',
+      summary: 'Balance fell 40%.', facts: { usdcNow: 1 }, method: 'balanceOf',
+      source: 'BASE_RPC', latencyMs: 12,
+    }],
+    corroborating: 1, contradicting: 0, inconclusive: 0, unavailable: 0,
+    blockNumber: 50_786_000, blockTimestamp: NOW, investigatedAt: NOW,
+    totalLatencyMs: 900, noTargetResolved: false, budgetExhausted: false,
+    promptBlock: '<ONCHAIN_EVIDENCE>…</ONCHAIN_EVIDENCE>',
+    ...over,
+  });
+
+  await check('evidence reaches the verifier and is stored on the job', async () => {
+    let seen: EvidencePacket | undefined;
+    const h = harness({
+      skipInvestigation: false,
+      // Reports its checks the way the real one does, so this exercises the
+      // onCheck wiring rather than only the final packet.
+      investigator: async (_alert, opts) => {
+        const p = packet();
+        for (const c of p.checks) opts?.onCheck?.(c);
+        return p;
+      },
+      verify: async (_alert, opts) => {
+        seen = opts?.evidence;
+        return fakeVerify()(_alert, opts);
+      },
+    });
+    const job = await runJob(newJob(alert(), { dryRun: true }), h.deps);
+    assert.ok(seen, 'verifier was not given the evidence');
+    assert.equal(seen.corroborating, 1);
+    assert.ok(job.evidence, 'evidence was not persisted on the job');
+    assert.ok(
+      h.events.some((e) => e.event === 'evidence'),
+      'no evidence frame was emitted',
+    );
+    assert.ok(
+      h.events.some((e) => e.event === 'check'),
+      'no per-check frame was emitted',
+    );
+  });
+
+  await check('an investigator that THROWS does not fail the job', async () => {
+    // `investigate` guarantees it never throws; this proves the pipeline
+    // survives even if that guarantee is ever broken by a code change.
+    let seen: unknown = 'untouched';
+    const h = harness({
+      skipInvestigation: false,
+      investigator: async () => { throw new Error('RPC exploded'); },
+      verify: async (_alert, opts) => {
+        seen = opts?.evidence;
+        return fakeVerify()(_alert, opts);
+      },
+      executor: okExecutor(),
+      attestor: okAttestor(),
+    });
+    const job = await runJob(newJob(alert(), { dryRun: true }), h.deps);
+    assert.equal(job.status, 'ATTESTED', 'a broken investigator must not stop the pipeline');
+    assert.equal(seen, undefined, 'verification must run with no evidence, not partial evidence');
+    assert.ok(job.verification, 'verification did not run');
+  });
+
+  await check('an investigator that HANGS past the budget does not hang the job', async () => {
+    // The stage owns its own budget; this asserts the pipeline does not wait
+    // on a check that never settles.
+    const h = harness({
+      skipInvestigation: false,
+      investigator: async () => packet({ budgetExhausted: true, checks: [], corroborating: 0 }),
+      executor: okExecutor(),
+      attestor: okAttestor(),
+    });
+    const job = await runJob(newJob(alert(), { dryRun: true }), h.deps);
+    assert.equal(job.status, 'ATTESTED');
+    assert.equal(job.evidence?.budgetExhausted, true, 'the exhausted budget should be visible');
+  });
+
+  await check('a claim naming nothing checkable still verifies', async () => {
+    const h = harness({
+      skipInvestigation: false,
+      investigator: async () => packet({ noTargetResolved: true, checks: [], corroborating: 0, targets: [] }),
+    });
+    const job = await runJob(newJob(alert(), { dryRun: true }), h.deps);
+    assert.ok(job.verification, 'verification must run even with nothing to check');
+    assert.equal(job.evidence?.noTargetResolved, true);
+  });
+
+  await check('a bypassed run announces itself and gathers nothing', async () => {
+    // The demo's second button. Skipping must be visible on the job and on the
+    // wire: a run that skipped the evidence and a run that gathered none look
+    // identical otherwise, and presenting the first as the second overclaims.
+    let investigatorCalled = false;
+    let sawEvidence: unknown = 'untouched';
+    const h = harness({
+      skipInvestigation: true,
+      investigator: async () => { investigatorCalled = true; return packet(); },
+      verify: async (a, o) => { sawEvidence = o?.evidence; return fakeVerify()(a, o); },
+      executor: okExecutor(),
+      attestor: okAttestor(),
+    });
+    const job = await runJob(newJob(alert(), { dryRun: true }), h.deps);
+    assert.equal(investigatorCalled, false, 'the investigator must not run when bypassed');
+    assert.equal(sawEvidence, undefined, 'no evidence may reach the models on a bypassed run');
+    assert.equal(job.investigationSkipped, true, 'the job must record that it skipped');
+    assert.equal(job.evidence, undefined, 'a bypassed run has no evidence');
+    assert.ok(
+      h.events.some((e) => e.event === 'status' && e.data.step === 'investigation-skipped'),
+      'the bypass must be announced on the stream',
+    );
+    assert.ok(
+      !h.events.some((e) => e.event === 'evidence' || e.event === 'check'),
+      'a bypassed run must emit no evidence or check frames',
+    );
+    // Bypassing changes what the models see, never whether the pipeline works.
+    assert.equal(job.status, 'ATTESTED');
+  });
+
+  await check('an emit that THROWS cannot fail a job that already executed', async () => {
+    // Regression. The first run to reach EXECUTING through the SSE route threw
+    // "Do not know how to serialize a BigInt" encoding the `position` frame —
+    // HedgePosition carries the raw SDK order, which is full of bigints. The
+    // throw escaped `emit`, hit the outer handler, and marked the job FAILED
+    // after the position had been built. A display bug must never do that.
+    const store = new InMemoryJobStore();
+    const vault = new SimulatedVaultDriver(new InMemoryLedgerStore(), VCFG, () => NOW);
+    let threw = 0;
+    const job = await runJob(newJob(alert(), { dryRun: true }), {
+      store, vault, verify: fakeVerify(), thresholds: T, now: () => NOW,
+      skipInvestigation: true,
+      executor: okExecutor(),
+      attestor: okAttestor(),
+      emit: () => { threw++; throw new TypeError('Do not know how to serialize a BigInt'); },
+    });
+    assert.ok(threw > 0, 'the emitter should have been called');
+    assert.equal(job.status, 'ATTESTED', 'a throwing emitter must not fail the pipeline');
+    assert.ok(job.position, 'the position must survive a display failure');
+    assert.equal(job.error, undefined, 'no error should be recorded for a display failure');
+  });
+
+  await check('a normal run does NOT mark itself skipped', async () => {
+    const h = harness({ skipInvestigation: false, investigator: async () => packet() });
+    const job = await runJob(newJob(alert(), { dryRun: true }), h.deps);
+    assert.notEqual(job.investigationSkipped, true);
+    assert.ok(job.evidence, 'evidence should be present on a normal run');
+  });
+
+  await check('investigation runs BEFORE verification', async () => {
+    const order: string[] = [];
+    const h = harness({
+      skipInvestigation: false,
+      investigator: async () => { order.push('investigate'); return packet(); },
+      verify: async (a, o) => { order.push('verify'); return fakeVerify()(a, o); },
+    });
+    await runJob(newJob(alert(), { dryRun: true }), h.deps);
+    assert.deepEqual(order, ['investigate', 'verify'], 'evidence must exist before the models are asked');
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

@@ -1,11 +1,31 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import type { ConsensusMetrics, HedgeDecision, ModelVerdict } from "@/types";
+import type {
+  ConsensusMetrics,
+  EvidencePacket,
+  HedgeDecision,
+  InvestigationCheck,
+  ModelVerdict,
+} from "@/types";
 
 /** What a real run fills in. Empty until the pipeline reports something. */
 interface LiveRun {
   jobId: string | null;
+  /** Stage 02 checks, as each one lands. */
+  checks: InvestigationCheck[];
+  /** The assembled stage 02 packet, once every check has settled. */
+  evidence: EvidencePacket | null;
+  /**
+   * True when this run deliberately skipped stage 02.
+   *
+   * Kept distinct from `evidence === null` on purpose. "We did not look" and
+   * "we looked and found nothing" produce the same empty state and mean
+   * opposite things, and the UI must never present the first as the second.
+   */
+  investigationSkipped: boolean;
+  /** Operator-injected runs are the only ones eligible to reach the book. */
+  tradeEligible: boolean;
   verdicts: ModelVerdict[];
   consensus: ConsensusMetrics | null;
   decision: HedgeDecision | null;
@@ -14,10 +34,52 @@ interface LiveRun {
 
 const EMPTY_RUN: LiveRun = {
   jobId: null,
+  checks: [],
+  evidence: null,
+  investigationSkipped: false,
+  tradeEligible: false,
   verdicts: [],
   consensus: null,
   decision: null,
   error: null,
+};
+
+/** Presentation for each stance. The words are the backend's, not the UI's. */
+const STANCE_STYLE: Record<
+  InvestigationCheck["stance"],
+  { mark: string; label: string; tone: string; border: string }
+> = {
+  CORROBORATES: {
+    mark: "✓",
+    label: "CORROBORATES",
+    tone: "text-red-300 bg-red-950/70 border-red-500/40",
+    border: "border-red-500/40",
+  },
+  CONTRADICTS: {
+    mark: "✗",
+    label: "CONTRADICTS",
+    tone: "text-emerald-300 bg-emerald-950/70 border-emerald-500/40",
+    border: "border-emerald-500/40",
+  },
+  INCONCLUSIVE: {
+    mark: "~",
+    label: "INCONCLUSIVE",
+    tone: "text-amber-300 bg-amber-950/70 border-amber-500/40",
+    border: "border-amber-500/30",
+  },
+  UNAVAILABLE: {
+    mark: "!",
+    label: "UNAVAILABLE",
+    tone: "text-zinc-400 bg-zinc-900 border-zinc-700",
+    border: "border-zinc-700",
+  },
+};
+
+const SOURCE_LABEL: Record<InvestigationCheck["source"], string> = {
+  BASE_RPC: "Base RPC",
+  DEFILLAMA: "DeFiLlama",
+  CHAINLINK: "Chainlink",
+  DEX: "DEX",
 };
 
 /** The claim sent when the operator has not typed one. */
@@ -129,7 +191,8 @@ const STAGES = [
     num: "02",
     name: "INVESTIGATE",
     question: "What evidence do we have?",
-    summaryResult: "🔍 $40.2M Outflow confirmed (16.8k ETH / 2 blocks) • Emergency pause triggered",
+    summaryResult:
+      "🔍 Balances, pause state, transfer rate, DEX depth, oracle gap and TVL — measured live before the models see the claim",
   },
   {
     id: "03_ANALYZE",
@@ -166,9 +229,17 @@ export function DashboardHero() {
   const [selectedNode, setSelectedNode] = useState<string>("node-live");
   const [openStages, setOpenStages] = useState<Record<string, boolean>>({});
 
+  /**
+   * Held in component state only, never persisted.
+   *
+   * The server compares it against OPERATOR_TOKEN, so an empty box simply
+   * means the injection route answers 401 — the same arrangement the operator
+   * panel uses.
+   */
+  const [operatorToken, setOperatorToken] = useState("");
+
   const [detectSearching, setDetectSearching] = useState<boolean>(true);
   const [step01Done, setStep01Done] = useState<boolean>(false);
-  const [investigateSubstep, setInvestigateSubstep] = useState<number>(0);
   const [modelState, setModelState] = useState<{
     mm: "IDLE" | "THINKING" | "DONE";
     km: "IDLE" | "THINKING" | "DONE";
@@ -258,30 +329,70 @@ export function DashboardHero() {
    * Model cards fill in as each model actually answers, so a slow model looks
    * slow and a dropped one is visibly missing.
    */
-  async function startLiveExecution() {
+  /**
+   * @param mode
+   *   "public"   POST /api/verify. No token. Runs stage 02. 🔒 Cannot trade:
+   *              the route forces source USER_PASTE, and `newJob` marks that
+   *              ineligible, so this path stops at DECIDED however high it
+   *              scores. That is the public deliverable, deliberately.
+   *
+   *   "operator" POST /api/simulate/inject with the operator token, skipping
+   *              stage 02. Injected alerts are MANUAL, which IS trade
+   *              eligible, so this is the only path from this page that can
+   *              reach the book.
+   *
+   * Bypassing stage 02 is what makes a live hedge reachable in a demo: the
+   * on-chain evidence is truthful about the real chain, so a scripted claim
+   * about an event that is not happening gets measured as not happening and
+   * scores accordingly. The bypass is labelled everywhere it shows, because a
+   * skipped investigation and an empty one look identical otherwise.
+   */
+  async function startLiveExecution(mode: "public" | "operator" = "public") {
     if (timerRef.current) clearTimeout(timerRef.current);
     sourceRef.current?.close();
+
+    const operator = mode === "operator";
+    if (operator && !operatorToken.trim()) {
+      setLive({
+        ...EMPTY_RUN,
+        error: "Operator token required — injection is the only path that can reach the book.",
+      });
+      return;
+    }
 
     setCurrentStep("01_DETECT");
     setSelectedNode("node-live");
     setOpenStages({ "01_DETECT": true });
     setDetectSearching(true);
     setStep01Done(false);
-    setInvestigateSubstep(0);
     setModelState({ mm: "IDLE", km: "IDLE", glm: "IDLE" });
     setChallengePhase("DISAGREEMENT");
     setScoreProgress(0);
     setProtectPhase("LOCATING");
-    setLive(EMPTY_RUN);
+    setLive({ ...EMPTY_RUN, investigationSkipped: operator, tradeEligible: operator });
 
     const text = DEFAULT_CLAIM;
 
     let jobId: string;
     try {
-      const res = await fetch("/api/verify", {
+      const res = await fetch(operator ? "/api/simulate/inject" : "/api/verify", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text }),
+        headers: {
+          "content-type": "application/json",
+          ...(operator ? { authorization: `Bearer ${operatorToken.trim()}` } : {}),
+        },
+        body: JSON.stringify(
+          operator
+            ? {
+                scenarioId: "scen_bridge_exploit",
+                skipInvestigation: true,
+                // 🔒 Left on. Turning this off spends real USDC on Base
+                // mainnet, and that belongs on the operator panel behind its
+                // own confirmation, not on a dashboard button.
+                dryRun: true,
+              }
+            : { text },
+        ),
       });
       const body = await res.json();
       if (!res.ok || !body?.jobId) {
@@ -294,11 +405,15 @@ export function DashboardHero() {
       return;
     }
 
-    setLive({ ...EMPTY_RUN, jobId });
+    setLive({
+      ...EMPTY_RUN,
+      jobId,
+      investigationSkipped: operator,
+      tradeEligible: operator,
+    });
     setDetectSearching(false);
     setStep01Done(true);
     setCurrentStep("02_INVESTIGATE");
-    setInvestigateSubstep(4);
 
     const es = new EventSource(`/api/verify/${jobId}/stream`);
     sourceRef.current = es;
@@ -310,11 +425,31 @@ export function DashboardHero() {
 
     es.addEventListener("status", (ev) => {
       const d = JSON.parse((ev as MessageEvent).data);
+      if (d.step === "investigating") setCurrentStep("02_INVESTIGATE");
+      if (d.step === "investigation-skipped") {
+        setCurrentStep("02_INVESTIGATE");
+        setLive((prev) => ({ ...prev, investigationSkipped: true }));
+      }
       if (d.step === "layer1") {
         setCurrentStep("03_ANALYZE");
         setModelState({ mm: "THINKING", km: "THINKING", glm: "THINKING" });
       }
       if (d.step === "synthesizing") setCurrentStep("04_CHALLENGE");
+    });
+
+    // Stage 02 lands one check at a time, so a slow RPC read looks slow rather
+    // than the whole stage appearing at once.
+    es.addEventListener("check", (ev) => {
+      const c: InvestigationCheck = JSON.parse((ev as MessageEvent).data);
+      setLive((prev) => ({ ...prev, checks: [...prev.checks, c] }));
+    });
+
+    es.addEventListener("evidence", (ev) => {
+      const e: EvidencePacket = JSON.parse((ev as MessageEvent).data);
+      // Take the packet's own list rather than the streamed one. Checks arrive
+      // in completion order, and if the stage hit its budget some may not have
+      // arrived at all — the packet is the complete, ordered record.
+      setLive((prev) => ({ ...prev, evidence: e, checks: e.checks }));
     });
 
     es.addEventListener("verdict", (ev) => {
@@ -459,17 +594,55 @@ export function DashboardHero() {
             </div>
           </div>
 
-            {/* Single Scenario Trigger Button */}
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => startLiveExecution()}
-                disabled={isRunning}
-                className="rounded-xl bg-gradient-to-r from-red-500 via-amber-500 to-emerald-400 px-5 py-2.5 text-xs font-black text-zinc-950 hover:opacity-90 active:scale-95 disabled:opacity-50 transition-all shadow-[0_0_20px_rgba(239,68,68,0.3)] cursor-pointer"
-              >
-                {isRunning ? "⚡ AUTONOMOUS RESOLUTION IN FLIGHT..." : "🧪 INJECT BRIDGE EXPLOIT SCENARIO"}
-              </button>
+            {/*
+              Two paths, because they are genuinely different runs and the
+              difference decides whether a hedge is even possible.
+
+              FULL      /api/verify — stage 02 runs. Forced USER_PASTE, which
+                        is not trade eligible, so it always stops at DECIDED.
+              BYPASS    /api/simulate/inject — operator token, stage 02 skipped,
+                        source MANUAL, so the decision can carry through to a
+                        fill. Labelled as a bypass wherever it shows.
+            */}
+            <div className="flex flex-col items-stretch sm:items-end gap-2">
+              <div className="flex flex-wrap items-center gap-2 justify-end">
+                <button
+                  onClick={() => startLiveExecution("public")}
+                  disabled={isRunning}
+                  className="rounded-xl bg-gradient-to-r from-red-500 via-amber-500 to-emerald-400 px-5 py-2.5 text-xs font-black text-zinc-950 hover:opacity-90 active:scale-95 disabled:opacity-50 transition-all shadow-[0_0_20px_rgba(239,68,68,0.3)] cursor-pointer"
+                  title="Full pipeline: stage 02 measures Base mainnet before the models score the claim. Public path — verification only, never trades."
+                >
+                  {isRunning ? "⚡ RESOLUTION IN FLIGHT..." : "🧪 INJECT — FULL PIPELINE"}
+                </button>
+
+                <button
+                  onClick={() => startLiveExecution("operator")}
+                  disabled={isRunning}
+                  className="rounded-xl border border-amber-500/60 bg-amber-950/50 px-5 py-2.5 text-xs font-black text-amber-200 hover:bg-amber-900/50 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
+                  title="Operator injection with stage 02 skipped. The models score the claim on its text alone, as they did before the investigation stage existed. This is the only path from this page that is eligible to reach the book."
+                >
+                  ⏭️ INJECT — BYPASS STAGE 02
+                </button>
+
+                <input
+                  type="password"
+                  value={operatorToken}
+                  onChange={(e) => setOperatorToken(e.target.value)}
+                  placeholder="OPERATOR_TOKEN"
+                  className="rounded-lg bg-[#0a0d14] border border-zinc-700 px-3 py-2 text-[11px] font-mono-code text-zinc-200 placeholder:text-zinc-600 focus:border-amber-500/60 focus:outline-none w-40"
+                  title="Required for the bypass path. Compared against OPERATOR_TOKEN server-side; never stored."
+                />
+              </div>
+
+              <div className="text-[10px] text-zinc-500 font-sans text-right max-w-md leading-relaxed">
+                <strong className="text-zinc-400">Full pipeline</strong> measures Base mainnet first, and is
+                verification-only — it never trades.{" "}
+                <strong className="text-amber-400/90">Bypass</strong> skips that evidence and scores the claim on
+                its wording alone, which is what makes a hedge reachable in a demo.
+              </div>
+
               {live.error && (
-                <span className="text-[11px] text-red-300 font-mono-code">{live.error}</span>
+                <span className="text-[11px] text-red-300 font-mono-code text-right">{live.error}</span>
               )}
             </div>
         </div>
@@ -926,75 +1099,179 @@ export function DashboardHero() {
                       )}
 
                       {/* ================= STAGE 02 DETAILS ================= */}
-                      {stage.id === "02_INVESTIGATE" && (
+                      {/*
+                        Stage 02 is measured, not scripted. Every card below is
+                        an InvestigationCheck returned by lib/investigate.ts — a
+                        real Base RPC read, a Chainlink round, a DEX pool, or a
+                        DeFiLlama figure. There is no placeholder branch: before
+                        the first check arrives this renders a waiting state, and
+                        a check that could not run says so rather than showing a
+                        result it does not have.
+                      */}
+                      {/*
+                        🔒 The bypass gets its own branch rather than falling
+                        through to the empty state. "We did not look" and "we
+                        looked and found nothing" render identically otherwise,
+                        and showing the first as the second would be a claim
+                        about the chain we never made.
+                      */}
+                      {stage.id === "02_INVESTIGATE" && live.investigationSkipped && (
                         <div className="space-y-3 pt-4 font-mono-code">
-                          {/* Agent Reasoning Notice */}
+                          <div className="rounded-xl bg-amber-950/40 p-4 border border-amber-500/50 space-y-2">
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                              <span className="text-sm font-bold text-amber-200 flex items-center gap-2">
+                                <span>⏭️</span> STAGE 02 BYPASSED
+                              </span>
+                              <span className="text-[11px] font-bold text-amber-300 bg-amber-950 px-2 py-0.5 rounded border border-amber-500/40">
+                                OPERATOR INJECTION
+                              </span>
+                            </div>
+                            <div className="text-xs text-zinc-200 font-sans leading-relaxed">
+                              No on-chain evidence was gathered for this run. The three models score the claim on
+                              its wording alone — the behaviour before the investigation stage existed.
+                            </div>
+                            <div className="text-[11px] text-amber-300/80 font-sans leading-relaxed border-t border-amber-900/50 pt-2">
+                              Nothing here is a statement about Base mainnet. The chain was not queried, so this
+                              run carries no corroboration and no contradiction either way. Use the full-pipeline
+                              button to see what the chain actually says about this claim.
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {stage.id === "02_INVESTIGATE" && !live.investigationSkipped && (
+                        <div className="space-y-3 pt-4 font-mono-code">
                           <div className="rounded-xl bg-[#09121d] p-3.5 border border-cyan-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                             <div className="flex items-center gap-2 text-zinc-300 font-sans">
                               <span className="text-cyan-400 font-bold font-mono-code">🤖 NutShell Agent:</span>
-                              <span>&ldquo;The social media signal alone is insufficient. Dispatching on-chain investigation tool calls.&rdquo;</span>
+                              <span>
+                                &ldquo;The social signal alone is insufficient. Measuring Base mainnet before the models see the claim.&rdquo;
+                              </span>
                             </div>
-                            <span className="text-cyan-300 font-bold bg-cyan-950 px-2 py-0.5 rounded border border-cyan-500/30">
-                              3 / 3 Tool Calls Executed
+                            <span className="text-cyan-300 font-bold bg-cyan-950 px-2 py-0.5 rounded border border-cyan-500/30 whitespace-nowrap">
+                              {live.evidence
+                                ? `${live.evidence.checks.length} checks · ${live.evidence.totalLatencyMs}ms`
+                                : `${live.checks.length} checks running…`}
                             </span>
                           </div>
 
-                          {/* Tool Call 1: checkRecentTransactions */}
-                          <div className="bg-[#070e17] p-3.5 rounded-xl space-y-1.5 border border-cyan-950">
-                            <div className="flex items-center justify-between text-xs text-cyan-300">
-                              <span className="font-bold flex items-center gap-2">
-                                <span>🔧 TOOL CALL:</span>
-                                <code className="bg-black/50 px-1.5 py-0.5 rounded text-cyan-200">
-                                  checkRecentTransactions(target: &quot;Base_Bridge&quot;)
-                                </code>
-                              </span>
-                              <span className="text-emerald-400 font-bold text-[11px]">✓ 2 BLOCKS SCANNED</span>
+                          {/* What the claim actually named, and how surely. */}
+                          {live.evidence && (
+                            <div className="rounded-xl bg-[#070e17] p-3 border border-zinc-800 text-xs space-y-1.5">
+                              <div className="flex items-center justify-between gap-3 flex-wrap">
+                                <span className="text-zinc-400">
+                                  <strong className="text-zinc-200">Targets resolved from the claim:</strong>{" "}
+                                  {live.evidence.targets.length === 0 ? (
+                                    <span className="text-amber-300">none — the claim names nothing checkable on Base</span>
+                                  ) : (
+                                    live.evidence.targets.map((t, i) => (
+                                      <span key={`${t.name}-${i}`} className="text-zinc-200">
+                                        {i > 0 && ", "}
+                                        {t.name}
+                                        <span className="text-zinc-500">/{t.kind.toLowerCase()}</span>
+                                        <span className={t.confidence === "BROAD" ? "text-amber-400" : "text-emerald-400"}>
+                                          [{t.confidence ?? "EXACT"}]
+                                        </span>
+                                      </span>
+                                    ))
+                                  )}
+                                </span>
+                                <span className="text-zinc-500 whitespace-nowrap">
+                                  block {live.evidence.blockNumber.toLocaleString()}
+                                </span>
+                              </div>
+                              {live.evidence.targets.some((t) => t.confidence === "BROAD") && (
+                                <div className="text-[11px] text-amber-300/90 font-sans">
+                                  A <strong>BROAD</strong> match resolved the kind of thing, not the specific one — so a
+                                  healthy reading there is reported as inconclusive rather than counted against the claim.
+                                </div>
+                              )}
                             </div>
-                            <div className="text-xs sm:text-sm text-zinc-200 pl-2 border-l-2 border-cyan-500/40">
-                              → <strong>16,800 ETH ($40.2M)</strong> abnormal outflow detected across 2 blocks (<strong>4.2×</strong> above historical baseline).
-                            </div>
-                          </div>
+                          )}
 
-                          {/* Tool Call 2: checkContractState */}
-                          <div className="bg-[#070e17] p-3.5 rounded-xl space-y-1.5 border border-cyan-950">
-                            <div className="flex items-center justify-between text-xs text-cyan-300">
-                              <span className="font-bold flex items-center gap-2">
-                                <span>🔧 TOOL CALL:</span>
-                                <code className="bg-black/50 px-1.5 py-0.5 rounded text-cyan-200">
-                                  checkContractState(contract: &quot;0x4904...BaseBridge&quot;)
-                                </code>
-                              </span>
-                              <span className="text-red-400 font-bold text-[11px]">✓ PAUSE DETECTED</span>
+                          {live.checks.length === 0 && !live.evidence && (
+                            <div className="bg-[#070e17] p-6 rounded-xl border border-cyan-900/30 flex flex-col items-center gap-2 text-center">
+                              <span className="inline-block animate-spin text-cyan-400 text-xl">⟳</span>
+                              <span className="text-sm font-bold text-white">Querying Base mainnet, Chainlink and DeFiLlama…</span>
+                              <span className="text-[11px] text-zinc-500">Archive balance reads, log windows, pool state and TVL</span>
                             </div>
-                            <div className="text-xs sm:text-sm text-zinc-200 pl-2 border-l-2 border-red-500/40">
-                              → Emergency withdrawal pause triggered. Contract state changed to <strong className="text-red-300">PAUSED</strong>.
-                            </div>
-                          </div>
+                          )}
 
-                          {/* Tool Call 3: checkPoolSlippage */}
-                          <div className="bg-[#070e17] p-3.5 rounded-xl space-y-1.5 border border-cyan-950">
-                            <div className="flex items-center justify-between text-xs text-cyan-300">
-                              <span className="font-bold flex items-center gap-2">
-                                <span>🔧 TOOL CALL:</span>
-                                <code className="bg-black/50 px-1.5 py-0.5 rounded text-cyan-200">
-                                  checkPoolSlippage(pool: &quot;WETH/USDC-Base&quot;)
-                                </code>
-                              </span>
-                              <span className="text-amber-400 font-bold text-[11px]">✓ IMBALANCE DETECTED</span>
-                            </div>
-                            <div className="text-xs sm:text-sm text-zinc-200 pl-2 border-l-2 border-amber-500/40">
-                              → Secondary market DEX slippage surge detected. Liquidity pool imbalance confirmed.
-                            </div>
-                          </div>
+                          {live.checks.map((c, i) => {
+                            const s = STANCE_STYLE[c.stance];
+                            return (
+                              <div
+                                key={`${c.id}-${i}`}
+                                className={`bg-[#070e17] p-3.5 rounded-xl space-y-1.5 border ${s.border}`}
+                              >
+                                <div className="flex items-start justify-between gap-3 text-xs flex-wrap">
+                                  <span className="font-bold flex items-center gap-2 text-cyan-300">
+                                    <span>🔧</span>
+                                    <code className="bg-black/50 px-1.5 py-0.5 rounded text-cyan-200">{c.id}</code>
+                                    <span className="text-zinc-400 font-normal">{c.title}</span>
+                                  </span>
+                                  <span className={`font-bold text-[11px] px-2 py-0.5 rounded border whitespace-nowrap ${s.tone}`}>
+                                    {s.mark} {s.label}
+                                  </span>
+                                </div>
 
-                          {/* Evidence Packet Ready Badge */}
-                          <div className="rounded-xl bg-[#06140e] p-3 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-300">
-                            <span className="flex items-center gap-2">
-                              <span>📦</span>
-                              <span><strong>Investigation Packet Complete:</strong> Compiled on-chain proofs & timestamps.</span>
-                            </span>
-                            <span className="font-bold">Ready for Triad Verification ➔</span>
-                          </div>
+                                <div className={`text-xs sm:text-sm text-zinc-200 pl-2 border-l-2 font-sans ${s.border}`}>
+                                  → {c.summary}
+                                </div>
+
+                                {Object.keys(c.facts).length > 0 && (
+                                  <div className="text-[11px] text-zinc-500 pl-2 break-all">
+                                    {Object.entries(c.facts)
+                                      .slice(0, 6)
+                                      .map(([k, v]) => `${k}=${v}`)
+                                      .join("  ·  ")}
+                                  </div>
+                                )}
+
+                                <div className="text-[11px] text-zinc-600 pl-2 flex items-center gap-2 flex-wrap">
+                                  <span className="text-zinc-500">{SOURCE_LABEL[c.source]}</span>
+                                  <span>·</span>
+                                  <span>{c.latencyMs}ms</span>
+                                  {c.target && (
+                                    <>
+                                      <span>·</span>
+                                      <span className="break-all">{c.target}</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+
+                          {live.evidence && (
+                            <div className="rounded-xl bg-[#06140e] p-3 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-300 gap-3 flex-wrap">
+                              <span className="flex items-center gap-2">
+                                <span>📦</span>
+                                <span>
+                                  <strong>Evidence packet:</strong>{" "}
+                                  <span className="text-red-300">{live.evidence.corroborating} corroborating</span>
+                                  {" · "}
+                                  <span className="text-emerald-300">{live.evidence.contradicting} contradicting</span>
+                                  {" · "}
+                                  <span className="text-amber-300">{live.evidence.inconclusive} inconclusive</span>
+                                  {live.evidence.unavailable > 0 && (
+                                    <>
+                                      {" · "}
+                                      <span className="text-zinc-400">{live.evidence.unavailable} unavailable</span>
+                                    </>
+                                  )}
+                                </span>
+                              </span>
+                              <span className="font-bold whitespace-nowrap">Handed to the three models ➔</span>
+                            </div>
+                          )}
+
+                          {live.evidence?.budgetExhausted && (
+                            <div className="rounded-xl bg-amber-950/40 p-3 border border-amber-500/40 text-[11px] text-amber-200 font-sans">
+                              The stage hit its time budget, so not every check finished. Verification continued with
+                              what did — the missing ones are reported as unavailable rather than guessed at.
+                            </div>
+                          )}
                         </div>
                       )}
 

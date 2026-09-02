@@ -1,4 +1,5 @@
 import { eventBus, jobStore } from "@/lib/runtime";
+import { safeStringify, toJsonSafe } from "@/lib/errors";
 import type { PipelineEvent } from "@/worker/pipeline";
 
 /** Streaming needs a long-lived Node process, not the edge runtime. */
@@ -62,9 +63,34 @@ export async function GET(
 
       const send = (ev: PipelineEvent) => {
         if (closed) return;
-        controller.enqueue(
-          encoder.encode(`event: ${ev.event}\ndata: ${JSON.stringify(ev.data)}\n\n`),
-        );
+        let payload: string;
+        try {
+          // 🔒 `toJsonSafe`, not bare `JSON.stringify`. A `position` frame
+          // carries the HedgePosition, whose `execution.selectedOrder.raw` is
+          // the untouched SDK order — and that is full of `bigint`, which
+          // plain stringify THROWS on (PRD §6.4, and the warning on
+          // DecodedOrder.raw).
+          //
+          // Measured: the first run that reached EXECUTING from this stream
+          // died with "Do not know how to serialize a BigInt", and because the
+          // throw propagated out of `emit` it failed the whole job — after the
+          // decision was made. The position was real and the pipeline marked it
+          // FAILED because of a display bug.
+          payload = safeStringify(toJsonSafe(ev.data));
+        } catch (e) {
+          // Never let a frame we cannot serialise kill the stream. Report the
+          // frame as unrenderable and keep going; the job itself is unaffected.
+          console.error(`[stream] could not serialise ${ev.event} frame:`, e);
+          payload = JSON.stringify({
+            error: {
+              code: "INTERNAL",
+              message: `Frame '${ev.event}' could not be serialised for display. The pipeline is unaffected; poll /api/verify/${jobId} for the record.`,
+              retryable: false,
+              correlationId: jobId,
+            },
+          });
+        }
+        controller.enqueue(encoder.encode(`event: ${ev.event}\ndata: ${payload}\n\n`));
         if (TERMINAL.has(ev.event)) finish();
       };
 

@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import type {
   AlertEvent,
+  EvidencePacket,
   ModelVerdict,
   Stance,
   VerificationResult,
@@ -270,6 +271,12 @@ computed mechanically from the three models and is not yours to change.
 Where the models disagree, say so explicitly and explain the disagreement. A
 reader must be able to see exactly where the models diverged and why.
 
+If an ONCHAIN_EVIDENCE block is present, it holds direct measurements of Base
+mainnet taken before the models were asked. Say what it showed and whether the
+models' conclusions line up with it. Where a model's reasoning conflicts with a
+measurement, name the conflict rather than smoothing it over — the reader is
+about to spend money and needs to see it.
+
 OUTPUT — JSON only, no prose, no code fences.
 {
   "severity": <int 1-5>,
@@ -300,23 +307,45 @@ OUTPUT — JSON only, no prose, no code fences.
  * `context` is reserved for genuinely evidentiary material — the body of a
  * fetched article, for instance — never for metadata about the delivery.
  */
-export function renderAlert(alert: AlertEvent, context?: string): string {
+export function renderAlert(
+  alert: AlertEvent,
+  context?: string,
+  /**
+   * Stage 02 output. Qualifies as evidentiary under the rule above: these are
+   * measurements taken from Base mainnet, the Chainlink feeds and DeFiLlama,
+   * not metadata about how the alert reached us. Whoever wrote the claim
+   * cannot author them, which is exactly what makes them worth showing.
+   */
+  evidence?: EvidencePacket,
+): string {
   const claim = `<CLAIM>
 ${alert.rawText.trim()}
 </CLAIM>`;
 
-  if (!context)
-    return `${claim}
+  const parts = [claim];
 
-Judge the CLAIM on its own content.`;
-
-  return `${claim}
-
-<RETRIEVED_SOURCE>
+  if (context) {
+    parts.push(`<RETRIEVED_SOURCE>
 ${context.trim()}
 </RETRIEVED_SOURCE>
 
-RETRIEVED_SOURCE is material fetched from the claim itself. Judge both together.`;
+RETRIEVED_SOURCE is material fetched from the claim itself. Judge both together.`);
+  }
+
+  if (evidence?.promptBlock) {
+    parts.push(evidence.promptBlock);
+  }
+
+  if (!context && !evidence?.promptBlock) {
+    parts.push('Judge the CLAIM on its own content.');
+  } else if (evidence?.promptBlock) {
+    parts.push(
+      'Judge the CLAIM against the evidence above. The evidence is measured, the claim is asserted;\n' +
+      'where they conflict, the measurement is the more reliable of the two.',
+    );
+  }
+
+  return parts.join('\n\n');
 }
 
 // ── Schemas ───────────────────────────────────────────────────────────────
@@ -476,7 +505,15 @@ interface RawCall {
   returnedModel: string;
 }
 
-async function chat(
+/**
+ * Exported for `scripts/measure-evidence-cost.ts` only.
+ *
+ * That script has to measure the real call — same timeout, same no-fallback
+ * header, same maxRetries 0 — because the question it answers is whether a
+ * larger prompt changes latency or pushes the completion past its ceiling.
+ * Re-creating a client in the script would measure a different call.
+ */
+export async function chat(
   modelId: string,
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
   timeoutMs: number,
@@ -625,9 +662,10 @@ async function callAnalyst(
   modelId: string,
   alert: AlertEvent,
   timeoutMs: number,
+  evidence?: EvidencePacket,
 ): Promise<AnalystOutcome> {
   const started = Date.now();
-  const userMsg = renderAlert(alert);
+  const userMsg = renderAlert(alert, undefined, evidence);
 
   const fail = (code: VoteFailure["code"], detail: string): AnalystOutcome => {
     // Never swallow a dropped vote. A degraded run that looks identical to a
@@ -743,6 +781,12 @@ export async function verifyThreat(
     debateMode?: boolean;
     timeoutMs?: number;
     /**
+     * Stage 02 evidence. Absent means this behaves exactly as it did before
+     * the investigation stage existed — the prompt is byte-identical — so a
+     * failed or skipped investigation costs the verification nothing.
+     */
+    evidence?: EvidencePacket;
+    /**
      * Fires as each model lands, not when all three finish. The probe uses it
      * for live progress; the worker uses it to emit the per-model `verdict`
      * SSE frame the UI renders per model.
@@ -763,7 +807,7 @@ export async function verifyThreat(
   const round = async (targets: string[]) => {
     const settled = await Promise.all(
       targets.map((m) =>
-        callAnalyst(m, alert, timeoutMs).then((r) => {
+        callAnalyst(m, alert, timeoutMs, opts.evidence).then((r) => {
           opts.onVerdict?.(r.ok ? r.verdict : null, m);
           return r;
         }),
@@ -820,7 +864,12 @@ export async function verifyThreat(
           { role: "system", content: SYNTHESIZER_PROMPT },
           {
             role: "user",
-            content: `${renderAlert(alert)}
+            // The synthesizer sees the evidence too. The reasoning trace is
+            // the part a human actually reads before deciding to spend money,
+            // and "the models agreed, and the chain showed the contract
+            // untouched" is a materially better explanation than the verdicts
+            // alone can give.
+            content: `${renderAlert(alert, undefined, opts.evidence)}
 
 <VERDICTS>
 ${JSON.stringify(
