@@ -331,34 +331,44 @@ export function DashboardHero() {
    */
   /**
    * @param mode
-   *   "public"   POST /api/verify. No token. Runs stage 02. 🔒 Cannot trade:
-   *              the route forces source USER_PASTE, and `newJob` marks that
-   *              ineligible, so this path stops at DECIDED however high it
-   *              scores. That is the public deliverable, deliberately.
+   *   "full"    Stage 02 runs. Routed by whether a token is present:
+   *             with one   → /api/simulate/inject, source MANUAL, trade
+   *                          eligible, so a hedge is reachable when the
+   *                          evidence actually supports the claim.
+   *             without    → /api/verify, the public deliverable.
    *
-   *   "operator" POST /api/simulate/inject with the operator token, skipping
-   *              stage 02. Injected alerts are MANUAL, which IS trade
-   *              eligible, so this is the only path from this page that can
-   *              reach the book.
+   *   "bypass"  /api/simulate/inject with stage 02 skipped. Operator only.
    *
-   * Bypassing stage 02 is what makes a live hedge reachable in a demo: the
-   * on-chain evidence is truthful about the real chain, so a scripted claim
-   * about an event that is not happening gets measured as not happening and
-   * scores accordingly. The bypass is labelled everywhere it shows, because a
-   * skipped investigation and an empty one look identical otherwise.
+   * 🔒 The public route can never trade, and that is not a limitation to work
+   * around. PRD §9.3 fixes it: `/api/verify` hardcodes source USER_PASTE and
+   * `newJob` derives `tradeEligible` from that, because a public URL that can
+   * spend real money is an open till (§9.5).
+   *
+   * What the token changes is WHICH route the full pipeline takes, not whether
+   * the evidence runs. An earlier version had only the bypass on the operator
+   * route, which left the better verification unable to trade and the weaker
+   * one able to — backwards, and an artefact of the wiring rather than any
+   * rule. Both paths are now trade eligible when authenticated; they differ
+   * only in whether the models are shown what the chain says.
    */
-  async function startLiveExecution(mode: "public" | "operator" = "public") {
+  async function startLiveExecution(mode: "full" | "bypass" = "full") {
     if (timerRef.current) clearTimeout(timerRef.current);
     sourceRef.current?.close();
 
-    const operator = mode === "operator";
-    if (operator && !operatorToken.trim()) {
+    const hasToken = operatorToken.trim().length > 0;
+    const bypass = mode === "bypass";
+
+    if (bypass && !hasToken) {
       setLive({
         ...EMPTY_RUN,
-        error: "Operator token required — injection is the only path that can reach the book.",
+        error: "Operator token required — bypassing stage 02 is an operator action.",
       });
       return;
     }
+
+    // Authenticated runs go through injection, which is the only trade-eligible
+    // path. Unauthenticated full runs still work, as public verification.
+    const authed = hasToken;
 
     setCurrentStep("01_DETECT");
     setSelectedNode("node-live");
@@ -369,23 +379,23 @@ export function DashboardHero() {
     setChallengePhase("DISAGREEMENT");
     setScoreProgress(0);
     setProtectPhase("LOCATING");
-    setLive({ ...EMPTY_RUN, investigationSkipped: operator, tradeEligible: operator });
+    setLive({ ...EMPTY_RUN, investigationSkipped: bypass, tradeEligible: authed });
 
     const text = DEFAULT_CLAIM;
 
     let jobId: string;
     try {
-      const res = await fetch(operator ? "/api/simulate/inject" : "/api/verify", {
+      const res = await fetch(authed ? "/api/simulate/inject" : "/api/verify", {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(operator ? { authorization: `Bearer ${operatorToken.trim()}` } : {}),
+          ...(authed ? { authorization: `Bearer ${operatorToken.trim()}` } : {}),
         },
         body: JSON.stringify(
-          operator
+          authed
             ? {
                 scenarioId: "scen_bridge_exploit",
-                skipInvestigation: true,
+                skipInvestigation: bypass,
                 // 🔒 Left on. Turning this off spends real USDC on Base
                 // mainnet, and that belongs on the operator panel behind its
                 // own confirmation, not on a dashboard button.
@@ -408,8 +418,8 @@ export function DashboardHero() {
     setLive({
       ...EMPTY_RUN,
       jobId,
-      investigationSkipped: operator,
-      tradeEligible: operator,
+      investigationSkipped: bypass,
+      tradeEligible: authed,
     });
     setDetectSearching(false);
     setStep01Done(true);
@@ -595,31 +605,35 @@ export function DashboardHero() {
           </div>
 
             {/*
-              Two paths, because they are genuinely different runs and the
-              difference decides whether a hedge is even possible.
+              Two runs that differ in ONE thing: whether the models are shown
+              what the chain says. Both are trade eligible when a token is
+              present, so the honest path is no longer the one that cannot act.
 
-              FULL      /api/verify — stage 02 runs. Forced USER_PASTE, which
-                        is not trade eligible, so it always stops at DECIDED.
-              BYPASS    /api/simulate/inject — operator token, stage 02 skipped,
-                        source MANUAL, so the decision can carry through to a
-                        fill. Labelled as a bypass wherever it shows.
+              FULL    stage 02 runs. With a token → injection (MANUAL, trade
+                      eligible). Without → /api/verify, the public deliverable,
+                      which PRD §9.3 fixes as verification-only.
+              BYPASS  stage 02 skipped. Operator only.
             */}
             <div className="flex flex-col items-stretch sm:items-end gap-2">
               <div className="flex flex-wrap items-center gap-2 justify-end">
                 <button
-                  onClick={() => startLiveExecution("public")}
+                  onClick={() => startLiveExecution("full")}
                   disabled={isRunning}
                   className="rounded-xl bg-gradient-to-r from-red-500 via-amber-500 to-emerald-400 px-5 py-2.5 text-xs font-black text-zinc-950 hover:opacity-90 active:scale-95 disabled:opacity-50 transition-all shadow-[0_0_20px_rgba(239,68,68,0.3)] cursor-pointer"
-                  title="Full pipeline: stage 02 measures Base mainnet before the models score the claim. Public path — verification only, never trades."
+                  title={
+                    operatorToken.trim()
+                      ? "Stage 02 measures Base mainnet, then the models score the claim against it. Operator-injected, so this can reach the book if the evidence supports the claim."
+                      : "Stage 02 measures Base mainnet, then the models score the claim against it. No token, so this runs as public verification and cannot trade (PRD §9.3). Add a token to make it trade eligible."
+                  }
                 >
                   {isRunning ? "⚡ RESOLUTION IN FLIGHT..." : "🧪 INJECT — FULL PIPELINE"}
                 </button>
 
                 <button
-                  onClick={() => startLiveExecution("operator")}
+                  onClick={() => startLiveExecution("bypass")}
                   disabled={isRunning}
                   className="rounded-xl border border-amber-500/60 bg-amber-950/50 px-5 py-2.5 text-xs font-black text-amber-200 hover:bg-amber-900/50 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
-                  title="Operator injection with stage 02 skipped. The models score the claim on its text alone, as they did before the investigation stage existed. This is the only path from this page that is eligible to reach the book."
+                  title="Operator injection with stage 02 skipped. The models score the claim on its text alone, as they did before the investigation stage existed."
                 >
                   ⏭️ INJECT — BYPASS STAGE 02
                 </button>
@@ -635,10 +649,23 @@ export function DashboardHero() {
               </div>
 
               <div className="text-[10px] text-zinc-500 font-sans text-right max-w-md leading-relaxed">
-                <strong className="text-zinc-400">Full pipeline</strong> measures Base mainnet first, and is
-                verification-only — it never trades.{" "}
-                <strong className="text-amber-400/90">Bypass</strong> skips that evidence and scores the claim on
-                its wording alone, which is what makes a hedge reachable in a demo.
+                <strong className="text-zinc-400">Full pipeline</strong> measures Base mainnet first, then scores
+                the claim against it.{" "}
+                <strong className="text-amber-400/90">Bypass</strong> skips that and scores the wording alone.
+                {operatorToken.trim() ? (
+                  <>
+                    {" "}
+                    Token present — both are operator-injected and{" "}
+                    <strong className="text-emerald-400/90">eligible to reach the book</strong> (dry run).
+                  </>
+                ) : (
+                  <>
+                    {" "}
+                    No token — full pipeline runs as{" "}
+                    <strong className="text-zinc-400">public verification and cannot trade</strong>; bypass needs a
+                    token.
+                  </>
+                )}
               </div>
 
               {live.error && (
