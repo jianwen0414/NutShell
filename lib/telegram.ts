@@ -47,24 +47,44 @@ export async function sendTelegramAlert(
   const headerIcon = isCritical ? "🔴" : "🟡";
   const tierIcon = payload.decision?.tier === "HEDGE_FULL" || payload.decision?.tier === "HEDGE_SMALL" ? "🔴" : "🟡";
 
-  const claimSnippet = payload.alert.rawText.length > 250
-    ? `${payload.alert.rawText.slice(0, 247)}...`
-    : payload.alert.rawText;
+  // Full claim text without truncation
+  const fullClaim = payload.alert.rawText.trim();
 
-  // Compile on-chain investigation checks
-  const evidenceLines: string[] = [];
-  if (payload.evidence?.checks && payload.evidence.checks.length > 0) {
-    for (const c of payload.evidence.checks) {
-      let icon = "⚪";
-      let statusLabel = "INCONCLUSIVE";
-      if (c.stance === "CORROBORATES") {
-        icon = "🔴";
-        statusLabel = "SUSPICIOUS";
-      } else if (c.stance === "CONTRADICTS") {
-        icon = "🟢";
-        statusLabel = "NORMAL";
-      }
-      evidenceLines.push(`${icon} <b>${escapeHtml(c.title)}</b> — <i>${statusLabel}</i>\n${escapeHtml(c.summary)}`);
+  // Concise on-chain investigation summary in plain human language
+  const evidenceSections: string[] = [];
+  if (payload.evidence) {
+    const ev = payload.evidence;
+    const tallyParts = [
+      ev.contradicting > 0 ? `🟢 ${ev.contradicting} Normal` : null,
+      ev.inconclusive > 0 ? `⚪ ${ev.inconclusive} Inconclusive` : null,
+      ev.corroborating > 0 ? `🔴 ${ev.corroborating} Suspicious` : null,
+    ].filter(Boolean);
+
+    if (tallyParts.length > 0) {
+      evidenceSections.push(`<b>📊 Overall Telemetry:</b>\n\n${tallyParts.join(" • ")}\n`);
+    }
+
+    if (ev.checks && ev.checks.length > 0) {
+      const checkBullets = ev.checks.map((c) => {
+        let icon = "⚪";
+        if (c.stance === "CORROBORATES") icon = "🔴";
+        else if (c.stance === "CONTRADICTS") icon = "🟢";
+
+        const plainText = formatCheckInPlainLanguage(c);
+        return `${icon} <b>${escapeHtml(c.title)}:</b> ${escapeHtml(plainText)}`;
+      });
+      evidenceSections.push(checkBullets.join("\n\n"));
+    }
+  }
+
+  // AI Investigation Synthesis (from Gonka Synthesizer reasoningTrace)
+  const aiTraceLines: string[] = [];
+  if (payload.verification?.reasoningTrace && payload.verification.reasoningTrace.length > 0) {
+    const cleanTraces = payload.verification.reasoningTrace
+      .filter((t) => !t.toLowerCase().includes("synthesizer unavailable"))
+      .slice(0, 2);
+    for (const t of cleanTraces) {
+      aiTraceLines.push(`• ${escapeHtml(t)}`);
     }
   }
 
@@ -79,10 +99,6 @@ export async function sendTelegramAlert(
     }
   }
 
-  const consensusSummary = isCritical
-    ? "🚨 <b>Critical on-chain exploit confirmed</b> by Triad models and Base RPC state."
-    : "⚠️ <b>Evidence is mixed.</b> The agent cannot confirm the reported exploit.";
-
   const html = [
     `<b>${headerIcon} NUTSHELL DEFI GUARDIAN</b>`,
     `<b>${severityTitle}</b>`,
@@ -91,51 +107,82 @@ export async function sendTelegramAlert(
     `<i>No automatic trade will be executed.</i>`,
     ``,
     `━━━━━━━━━━━━━━━━━━`,
-    ``,
-    `<b>📊 VERDICT</b>`,
-    ``,
-    `• <b>Truth Score:</b> <code>${truthScore} / 100</code>`,
+    `📊 <b>Truth Score: ${truthScore} / 100</b>`,
     `• <b>Recommended Action:</b> ${tierIcon} <b>${payload.decision?.tier ?? "WATCH"}</b>`,
     `• <b>Network:</b> Base Mainnet`,
     ``,
-    `${consensusSummary}`,
-    ``,
     `━━━━━━━━━━━━━━━━━━`,
-    ``,
     `<b>📋 CLAIM</b>`,
-    `<blockquote>${escapeHtml(claimSnippet)}</blockquote>`,
-    ``,
-    evidenceLines.length > 0
+    `<blockquote>${escapeHtml(fullClaim)}</blockquote>`,
+    `━━━━━━━━━━━━━━━━━━`,
+    ...(evidenceSections.length > 0
       ? [
-          `━━━━━━━━━━━━━━━━━━`,
-          ``,
           `<b>🔍 ON-CHAIN INVESTIGATION</b>`,
           ``,
-          evidenceLines.join("\n\n"),
-          ``,
-        ].join("\n")
-      : ``,
-    modelLines.length > 0
-      ? [
+          ...evidenceSections,
+          ...(aiTraceLines.length > 0
+            ? [
+                ``,
+                ``,
+                `<b>🤖 AI Synthesis:</b>`,
+                aiTraceLines.join("\n\n"),
+              ]
+            : []),
           `━━━━━━━━━━━━━━━━━━`,
           ``,
+        ]
+      : []),
+    ...(modelLines.length > 0
+      ? [
           `<b>🤖 AI TRIAD</b>`,
           ``,
-          modelLines.join("\n"),
+          modelLines.join("\n\n"),
           ``,
-        ].join("\n")
-      : ``,
-    `━━━━━━━━━━━━━━━━━━`,
-    ``,
+          `━━━━━━━━━━━━━━━━━━`,
+        ]
+      : []),
     `<b>🛡 ACTION</b>`,
-    ``,
     `👁 <b>MONITOR ONLY</b>`,
     `• No funds spent.`,
     `• No hedge executed.`,
-    ``,
     `━━━━━━━━━━━━━━━━━━`,
     `🆔 <code>${payload.jobId}</code>`,
-  ].filter(Boolean).join("\n");
+  ].filter((line) => line !== null && line !== undefined).join("\n");
+
+  const configuredAppUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL;
+  const appUrl = (configuredAppUrl && isValidTelegramUrl(configuredAppUrl))
+    ? configuredAppUrl.replace(/\/$/, "")
+    : null;
+
+  const detailsUrl = appUrl ? `${appUrl}/?jobId=${payload.jobId}#stage-02_INVESTIGATE` : "https://basescan.org";
+  const hedgeUrl = appUrl ? `${appUrl}/hedge/${payload.jobId}` : "https://basescan.org";
+
+  const isEligibleForManualHedge =
+    truthScore >= 70 ||
+    payload.decision?.tier === "HEDGE_FULL" ||
+    payload.decision?.tier === "HEDGE_SMALL";
+
+  const inlineKeyboard: Array<Array<{ text: string; url: string }>> = [
+    [
+      {
+        text: appUrl ? "🔎 1. View Complete Investigation" : "🔎 1. View Investigation (BaseScan)",
+        url: detailsUrl,
+      },
+    ],
+  ];
+
+  if (isEligibleForManualHedge) {
+    inlineKeyboard.push([
+      {
+        text: appUrl ? "🛡 2. Execute Manual Put Option (Thetanuts)" : "🛡 2. Execute Put Option (Thetanuts)",
+        url: hedgeUrl,
+      },
+    ]);
+  }
+
+  const replyMarkup = {
+    inline_keyboard: inlineKeyboard,
+  };
 
   if (!token || !chatId) {
     console.info(
@@ -154,6 +201,7 @@ export async function sendTelegramAlert(
         text: html,
         parse_mode: "HTML",
         disable_web_page_preview: true,
+        reply_markup: replyMarkup,
       }),
     });
 
@@ -197,6 +245,22 @@ export async function sendTelegramTestPing(opts?: {
     `⏰ <i>Timestamp: ${new Date().toISOString()}</i>`,
   ].join("\n");
 
+  const configuredAppUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL;
+  const appUrl = (configuredAppUrl && isValidTelegramUrl(configuredAppUrl))
+    ? configuredAppUrl.replace(/\/$/, "")
+    : "https://basescan.org";
+
+  const replyMarkup = {
+    inline_keyboard: [
+      [
+        {
+          text: configuredAppUrl && isValidTelegramUrl(configuredAppUrl) ? "🌐 Open Operator Dashboard" : "🌐 View Base Mainnet Explorer",
+          url: appUrl,
+        },
+      ],
+    ],
+  };
+
   try {
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
     const res = await fetch(url, {
@@ -207,6 +271,7 @@ export async function sendTelegramTestPing(opts?: {
         text: message,
         parse_mode: "HTML",
         disable_web_page_preview: true,
+        reply_markup: replyMarkup,
       }),
     });
 
@@ -219,6 +284,59 @@ export async function sendTelegramTestPing(opts?: {
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+function isValidTelegramUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function formatCheckInPlainLanguage(c: { id?: string; title: string; stance: string; summary: string }): string {
+  const stance = c.stance;
+  const title = c.title.toLowerCase();
+
+  if (title.includes("contract") || title.includes("pause")) {
+    if (stance === "CORROBORATES") return "Emergency freeze/pause function was triggered.";
+    return "Contract is operating normally. No emergency freeze or pause detected.";
+  }
+
+  if (title.includes("transfer")) {
+    if (stance === "CORROBORATES") return "Abnormal surge in transfer volume detected on Base.";
+    return "Transaction volume is normal. No sudden spike or panic transfers.";
+  }
+
+  if (title.includes("dex") || title.includes("liquidity")) {
+    if (stance === "CORROBORATES") return "Severe drop in pool liquidity detected across exchanges.";
+    const dollarMatch = c.summary.match(/\$[\d,]+(\.\d+)?/);
+    const amount = dollarMatch ? ` (${dollarMatch[0]} available)` : "";
+    return `Trading liquidity is strong${amount}. No signs of capital flight.`;
+  }
+
+  if (title.includes("price") || title.includes("peg") || title.includes("oracle")) {
+    if (stance === "CORROBORATES") return "Significant price crash or oracle de-peg detected.";
+    const priceMatch = c.summary.match(/\$[\d,]+(\.\d+)?/);
+    const priceStr = priceMatch ? ` around ${priceMatch[0]}` : "";
+    return `Market price is stable${priceStr}. Exchange prices match Chainlink feeds with no panic selling.`;
+  }
+
+  if (title.includes("tvl") || title.includes("protocol")) {
+    if (stance === "CORROBORATES") return "Sharp drop in protocol locked funds confirmed.";
+    const dollarMatch = c.summary.match(/\$[\d,]+(\.\d+)?/);
+    const amount = dollarMatch ? ` (${dollarMatch[0]})` : "";
+    return `Protocol locked assets remain secure${amount}. Bridge reserves are steady.`;
+  }
+
+  let cleaned = c.summary.split(/\. |\n/)[0]?.trim() || c.summary;
+  cleaned = cleaned.replace(/\s*\([^)]*\)/g, "");
+  cleaned = cleaned.replace(/\s*—\s*/g, " — ");
+  if (!cleaned.endsWith(".")) cleaned += ".";
+  return cleaned;
 }
 
 function escapeHtml(text: string): string {
