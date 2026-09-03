@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { errorJson, json } from "@/lib/api";
+import { isAgentPaused } from "@/lib/control-state";
 import { newCorrelationId } from "@/lib/ids";
 import { startVerification } from "@/lib/runtime";
 import type { AlertEvent, AlertSourceType } from "@/types";
@@ -14,6 +15,16 @@ import type { AlertEvent, AlertSourceType } from "@/types";
  */
 export async function POST(request: Request) {
   const correlationId = newCorrelationId();
+
+  if (isAgentPaused()) {
+    return errorJson(
+      "AGENT_PAUSED",
+      "Autonomous agent is currently PAUSED. Resume the agent in the Control Center to run investigations.",
+      correlationId,
+      { status: 423 }
+    );
+  }
+
   const body = await request.json().catch(() => null);
 
   if (!body || typeof body.text !== "string" || !body.text.trim()) {

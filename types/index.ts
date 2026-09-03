@@ -499,6 +499,7 @@ export type ErrorCode =
   | "INSUFFICIENT_GAS"
   | "DUPLICATE_REQUEST"
   | "POLICY_REJECTED"
+  | "AGENT_PAUSED"
   | "INTERNAL";
 
 export interface ErrorEnvelope {

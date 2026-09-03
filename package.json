@@ -9,8 +9,8 @@
     "lint": "eslint",
     "worker": "tsx worker/index.ts",
     "demo": "tsx scripts/demo.ts",
+    "db:check": "tsx scripts/check-db.ts",
     "typecheck": "tsc --noEmit",
-
     "test": "vitest run",
     "test:unit": "vitest run",
     "test:watch": "vitest",
@@ -21,15 +21,12 @@
     "test:policy": "tsx scripts/test-policy.ts",
     "test:vault": "tsx scripts/test-vault.ts",
     "test:worker": "tsx scripts/test-worker.ts",
-
     "probe:evidence": "tsx scripts/probe-evidence.ts",
     "test:investigate": "tsx scripts/test-investigate.ts",
     "measure:evidence": "tsx scripts/measure-evidence-cost.ts",
-
     "probe:gonka": "tsx scripts/probe-gonka.ts",
     "diag:kimi": "tsx scripts/diag-kimi.ts",
     "verify:chain": "tsx scripts/verify-chain-link.ts",
-
     "probe": "tsx scripts/probe-book.ts",
     "probe:ttl": "tsx scripts/measure-ttl.ts",
     "identify:tokens": "tsx scripts/identify-tokens.ts",
@@ -48,6 +45,7 @@
     "ethers": "^6.13.0",
     "next": "16.3.3",
     "openai": "^4.77.0",
+    "pg": "^8.23.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "zod": "^3.24.1"
@@ -55,6 +53,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^22",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

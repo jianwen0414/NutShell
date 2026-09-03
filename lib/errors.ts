@@ -43,6 +43,7 @@ export const ERROR_REGISTRY: Record<ErrorCode, { http: number; retryable: boolea
   // Not failures: an idempotency replay and a policy REJECT/WATCH both 200.
   DUPLICATE_REQUEST: { http: 200, retryable: false },
   POLICY_REJECTED: { http: 200, retryable: false },
+  AGENT_PAUSED: { http: 423, retryable: false },
   INTERNAL: { http: 500, retryable: false },
 };
 

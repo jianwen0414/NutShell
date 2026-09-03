@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { Navigation } from "@/components/navigation";
 
@@ -189,9 +189,96 @@ export default function ControlPage() {
 
   const verificationResultRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    fetch("/api/control/status")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.status) setAgentStatus(d.status);
+        if (d?.mode) setExecMode(d.mode);
+      })
+      .catch(() => {});
+  }, []);
+
   function showToast(msg: string) {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
+  }
+
+  async function handleToggleStatus() {
+    const nextStatus = agentStatus === "ARMED" ? "PAUSED" : "ARMED";
+    try {
+      const res = await fetch("/api/control/status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      const data = await res.json();
+      if (data?.status) {
+        setAgentStatus(data.status);
+        showToast(
+          data.status === "PAUSED"
+            ? "⏸ Agent autonomous monitoring PAUSED. Investigations halted."
+            : "▶ Agent monitoring RESUMED & ARMED."
+        );
+      }
+    } catch {
+      showToast("Failed to update agent status on server.");
+    }
+  }
+
+  async function handleToggleMode() {
+    const nextMode = execMode === "MONITOR_ONLY" ? "AUTONOMOUS" : "MONITOR_ONLY";
+    try {
+      const res = await fetch("/api/control/status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mode: nextMode }),
+      });
+      const data = await res.json();
+      if (data?.mode) {
+        setExecMode(data.mode);
+        showToast(`Live Override: Mode set to ${data.mode}.`);
+      }
+    } catch {
+      showToast("Failed to update execution mode on server.");
+    }
+  }
+
+  async function handleTestTelegram() {
+    showToast("📲 Sending test ping to Telegram...");
+    try {
+      const res = await fetch("/api/control/telegram", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        showToast("✅ Telegram test ping sent! Check your phone.");
+      } else {
+        showToast(`⚠️ Telegram: ${data?.error ?? "Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env"}`);
+      }
+    } catch {
+      showToast("Network error contacting Telegram API.");
+    }
+  }
+
+  async function handleEmergencyPause() {
+    try {
+      const res = await fetch("/api/control/status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "PAUSED" }),
+      });
+      const data = await res.json();
+      if (data?.status) {
+        setAgentStatus("PAUSED");
+        showToast("🛑 AGENT PAUSED on server. Investigations halted.");
+      }
+    } catch {
+      setAgentStatus("PAUSED");
+      showToast("🛑 AGENT PAUSED locally.");
+    }
   }
 
   /**
@@ -206,6 +293,10 @@ export default function ControlPage() {
    */
   async function handleVerify() {
     if (!claimText.trim()) return;
+    if (agentStatus === "PAUSED") {
+      showToast("Cannot verify: Agent is PAUSED. Resume agent first.");
+      return;
+    }
     setIsVerifying(true);
     setVerifyStep(1);
     setVerifiedOutcome(null);
@@ -404,33 +495,43 @@ export default function ControlPage() {
             </div>
           </div>
 
+          {/* Telegram Alert Dispatcher Banner */}
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-[#050c16] border border-cyan-950 text-xs">
+            <div className="flex items-center gap-2.5">
+              <span className="text-base">📱</span>
+              <div>
+                <span className="font-bold text-white">Telegram Push Notifications: </span>
+                <span className="text-cyan-300">
+                  {execMode === "MONITOR_ONLY"
+                    ? "ARMED for Monitor Only (Alerts dispatch on Truth Score ≥ 40)"
+                    : "Standby (Armed when switched to Monitor Only)"}
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={handleTestTelegram}
+              className="py-1.5 px-3 rounded-lg bg-cyan-950 hover:bg-cyan-900 border border-cyan-500/40 text-cyan-300 font-bold transition-all text-xs cursor-pointer whitespace-nowrap shadow-[0_0_12px_rgba(6,182,212,0.2)]"
+            >
+              📲 Test Telegram Ping
+            </button>
+          </div>
+
           {/* Quick Override Action Buttons */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <button
-                onClick={() => {
-                  setAgentStatus(agentStatus === "ARMED" ? "PAUSED" : "ARMED");
-                  showToast(
-                    agentStatus === "ARMED"
-                      ? "Agent autonomous monitoring paused."
-                      : "Agent monitoring resumed & armed."
-                  );
-                }}
+                onClick={handleToggleStatus}
                 className={`py-2 px-4 rounded-xl font-mono-code font-bold text-xs transition-all cursor-pointer flex-1 sm:flex-none ${
                   agentStatus === "ARMED"
                     ? "bg-zinc-800 hover:bg-zinc-700 text-amber-300 border border-amber-500/30"
-                    : "bg-emerald-500 hover:bg-emerald-400 text-zinc-950"
+                    : "bg-emerald-500 hover:bg-emerald-400 text-zinc-950 shadow-[0_0_15px_rgba(16,185,129,0.4)]"
                 }`}
               >
                 {agentStatus === "ARMED" ? "⏸ PAUSE AGENT" : "▶ RESUME AGENT"}
               </button>
 
               <button
-                onClick={() => {
-                  const newMode = execMode === "MONITOR_ONLY" ? "AUTONOMOUS" : "MONITOR_ONLY";
-                  setExecMode(newMode);
-                  showToast(`Live Override: Mode set to ${newMode}.`);
-                }}
+                onClick={handleToggleMode}
                 className="py-2 px-4 rounded-xl bg-[#050b12] hover:bg-zinc-800 border border-zinc-700 text-zinc-300 font-mono-code font-bold text-xs transition-all cursor-pointer flex-1 sm:flex-none"
               >
                 {execMode === "MONITOR_ONLY" ? "🤖 RESTORE AUTONOMOUS" : "👁 SWITCH TO MONITOR ONLY"}
@@ -707,13 +808,7 @@ export default function ControlPage() {
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
             <button
-              onClick={() => {
-                // Local UI state only: this pauses what the operator sees. It
-                // does not reach into a transaction already in flight, and it
-                // does not claim to.
-                setAgentStatus("PAUSED");
-                showToast("🛑 AGENT PAUSED locally. An in-flight transaction cannot be recalled.");
-              }}
+              onClick={handleEmergencyPause}
               className="rounded-xl bg-red-950/90 hover:bg-red-900 text-red-300 p-3 border border-red-800/60 font-bold text-xs transition-all text-center cursor-pointer shadow-[0_0_12px_rgba(239,68,68,0.2)]"
             >
               🛑 PAUSE AGENT

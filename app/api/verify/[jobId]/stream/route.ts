@@ -17,7 +17,7 @@ const TERMINAL = new Set(["done", "error"]);
  * during the long wait while the models think.
  */
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ jobId: string }> },
 ) {
   const { jobId } = await params;
@@ -42,6 +42,8 @@ export async function GET(
     );
   }
 
+  let finishStream: (() => void) | undefined;
+
   const stream = new ReadableStream({
     start(controller) {
       let closed = false;
@@ -58,8 +60,14 @@ export async function GET(
         if (heartbeat) clearInterval(heartbeat);
         if (expiry) clearTimeout(expiry);
         unsubscribe?.();
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Controller might already be closed by runtime if client aborted
+        }
       };
+
+      finishStream = finish;
 
       const send = (ev: PipelineEvent) => {
         if (closed) return;
@@ -70,12 +78,6 @@ export async function GET(
           // the untouched SDK order — and that is full of `bigint`, which
           // plain stringify THROWS on (PRD §6.4, and the warning on
           // DecodedOrder.raw).
-          //
-          // Measured: the first run that reached EXECUTING from this stream
-          // died with "Do not know how to serialize a BigInt", and because the
-          // throw propagated out of `emit` it failed the whole job — after the
-          // decision was made. The position was real and the pipeline marked it
-          // FAILED because of a display bug.
           payload = safeStringify(toJsonSafe(ev.data));
         } catch (e) {
           // Never let a frame we cannot serialise kill the stream. Report the
@@ -90,7 +92,12 @@ export async function GET(
             },
           });
         }
-        controller.enqueue(encoder.encode(`event: ${ev.event}\ndata: ${payload}\n\n`));
+        try {
+          controller.enqueue(encoder.encode(`event: ${ev.event}\ndata: ${payload}\n\n`));
+        } catch {
+          finish();
+          return;
+        }
         if (TERMINAL.has(ev.event)) finish();
       };
 
@@ -99,12 +106,30 @@ export async function GET(
       if (closed) return;
 
       heartbeat = setInterval(() => {
-        if (!closed) controller.enqueue(encoder.encode(":ka\n\n"));
+        if (closed) {
+          if (heartbeat) clearInterval(heartbeat);
+          return;
+        }
+        try {
+          controller.enqueue(encoder.encode(":ka\n\n"));
+        } catch {
+          finish();
+        }
       }, 15_000);
 
       // A pipeline that dies without a terminal frame must not hold the
       // connection open forever.
       expiry = setTimeout(finish, 5 * 60_000);
+
+      // If client disconnects HTTP request, clean up immediately
+      if (request.signal.aborted) {
+        finish();
+      } else {
+        request.signal.addEventListener("abort", finish, { once: true });
+      }
+    },
+    cancel() {
+      finishStream?.();
     },
   });
 

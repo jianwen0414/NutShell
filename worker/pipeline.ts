@@ -17,6 +17,9 @@ import { verifyThreat } from '../lib/gonka';
 import { evidenceHeadline, investigate } from '../lib/investigate';
 import { decide, thresholdsFromEnv, type PolicyState, type Thresholds } from '../lib/policy';
 import type { VaultDriver } from '../lib/vault';
+import { getControlState } from '../lib/control-state';
+import { sendTelegramAlert } from '../lib/telegram';
+import { persistJobToDb } from '../lib/postgres';
 
 /**
  * alert → investigate → verify → decide → execute → attest.
@@ -285,6 +288,32 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
     await advance('DECIDED', { decision });
     emit({ event: 'decision', data: decision });
 
+    // ── 3.5. Monitor Only Override ────────────────────────────────────────
+    // If the operator has configured MONITOR_ONLY mode, do not commit vault
+    // reserves or execute on-chain options. Instead, dispatch an instant
+    // Telegram push alert if suspicion reaches Truth Score >= 40.
+    if (getControlState().mode === 'MONITOR_ONLY') {
+      const truthScore = verification.consensus?.truthScore ?? 0;
+      if (truthScore >= 40 || decision.tier === 'HEDGE_SMALL' || decision.tier === 'HEDGE_FULL') {
+        try {
+          await sendTelegramAlert({
+            jobId: job.jobId,
+            alert: job.alert,
+            evidence: job.evidence,
+            verification,
+            decision,
+          });
+          emit({
+            event: 'status',
+            data: { status: 'DECIDED', step: 'monitor-alert-sent' },
+          });
+        } catch (e) {
+          console.error('[pipeline] Failed to send Telegram alert:', e);
+        }
+      }
+      return finish(job, deps, 'DECIDED', now, emit);
+    }
+
     // ── 4. Stop here unless this is a real, eligible hedge ────────────────
     if (!job.tradeEligible) {
       // Not a failure: the public path is verification only, and the
@@ -333,6 +362,10 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
       }
     }
 
+    await persistJobToDb(job).catch((err) => {
+      console.error('[pipeline] Failed to persist job to database:', err);
+    });
+
     emit({ event: 'done', data: { status: job.status } });
     return job;
   } catch (e) {
@@ -350,6 +383,9 @@ async function finish(
 ): Promise<Job> {
   Object.assign(job, { status, updatedAt: now() });
   await deps.store.save(job);
+  await persistJobToDb(job).catch((err) => {
+    console.error('[pipeline] Failed to persist job to database in finish():', err);
+  });
   emit({ event: 'status', data: { status } });
   emit({ event: 'done', data: { status } });
   return job;

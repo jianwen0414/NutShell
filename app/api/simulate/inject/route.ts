@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { errorJson, hasOperatorToken, json } from "@/lib/api";
+import { isAgentPaused } from "@/lib/control-state";
 import { newCorrelationId } from "@/lib/ids";
 import { startVerification } from "@/lib/runtime";
 import { SIMULATOR_SCENARIOS } from "@/lib/simulator";
@@ -23,6 +24,15 @@ export async function POST(request: Request) {
       "UNAUTHORIZED",
       "Operator token required. Set OPERATOR_TOKEN and send it as a bearer token.",
       correlationId,
+    );
+  }
+
+  if (isAgentPaused()) {
+    return errorJson(
+      "AGENT_PAUSED",
+      "Autonomous agent is currently PAUSED. Resume the agent in the Control Center to inject scenarios.",
+      correlationId,
+      { status: 423 },
     );
   }
 

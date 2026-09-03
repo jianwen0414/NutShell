@@ -32,6 +32,7 @@ const STATUS: Partial<Record<ErrorCode, number>> = {
   TX_REVERTED: 502,
   MARKET_DATA_STALE: 503,
   ASSET_UNRESOLVED: 500,
+  AGENT_PAUSED: 423,
   INTERNAL: 500,
 };
 
