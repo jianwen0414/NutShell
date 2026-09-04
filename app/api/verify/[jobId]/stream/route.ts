@@ -50,9 +50,14 @@ export async function GET(
       // Declared before subscribing. A job that has already finished replays
       // its entire history synchronously inside subscribe(), so `finish` can
       // run before these are assigned unless they exist first.
+      //
+      // prefer-const is disabled rather than obeyed: all three are assigned
+      // after `finish` closes over them, which the rule does not see.
+      /* eslint-disable prefer-const */
       let heartbeat: ReturnType<typeof setInterval> | undefined;
       let unsubscribe: (() => void) | undefined;
       let expiry: ReturnType<typeof setTimeout> | undefined;
+      /* eslint-enable prefer-const */
 
       const finish = () => {
         if (closed) return;

@@ -5,6 +5,7 @@ import { toJsonSafe } from "@/lib/errors";
 import { healthCheck } from "@/lib/thetanuts";
 import { registrySummary } from "@/lib/assets";
 import { investigationHealth, investigationConfig, LOG_WINDOW_BLOCKS } from "@/lib/investigate";
+import { gonkaHealth } from "@/lib/gonka";
 
 /**
  * PRD §9.6 — "how a failure gets diagnosed in ten seconds instead of three
@@ -25,20 +26,36 @@ export async function GET() {
     // deliberately do NOT gate `status`. A degraded investigation costs the
     // verification some evidence; it never stops a hedge, so reporting the
     // whole system as down because DeFiLlama is slow would be wrong.
-    const [h, inv] = await Promise.all([
+    const [h, inv, gonka] = await Promise.all([
       healthCheck(),
       investigationHealth().catch((e) => ({
         archiveReads: false, logWindow: false, defillama: false,
         errors: [`investigation health check threw: ${e instanceof Error ? e.message : String(e)}`],
       })),
+      // PRD §18 asks for Gonka alongside the chain checks. It was the one of
+      // the four that was missing, which is how a model quietly leaving the
+      // router went unnoticed until a run failed quorum in front of us.
+      gonkaHealth().catch((e) => ({
+        reachable: false,
+        available: [] as string[],
+        resolved: [] as string[],
+        missing: [] as string[],
+        degraded: true,
+        quorum: 2,
+        error: e instanceof Error ? e.message : String(e),
+      })),
     ]);
     const skewOk = h.clockSkewWithinLimit === true;
-    const ok = h.rpcOk && h.bookOk && skewOk && h.errors.length === 0;
+    // A degraded panel does not take the system down — quorum can still be met
+    // on two models — but it must not report as green either.
+    const ok =
+      h.rpcOk && h.bookOk && skewOk && h.errors.length === 0 && !gonka.degraded;
 
     return json(
       toJsonSafe({
         status: ok ? "ok" : h.rpcOk && h.bookOk ? "degraded" : "down",
         checkedAt: new Date().toISOString(),
+        gonka,
         rpc: {
           reachable: h.rpcOk,
           chainId: h.chainId ?? null,

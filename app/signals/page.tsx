@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { Navigation } from "@/components/navigation";
+import { useOperatorToken } from "@/components/console/use-operator-token";
 
 /**
  * Stage 01 — what the system read and what it did about it.
@@ -88,7 +90,7 @@ export default function FeedPage() {
   const [items, setItems] = useState<EventItem[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
-  const [operatorToken, setOperatorToken] = useState("");
+  const { authHeaders, hasToken } = useOperatorToken();
   const [scanning, setScanning] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -97,6 +99,7 @@ export default function FeedPage() {
   // render — the pattern the React compiler flags, because a ref mutated
   // outside a commit can disagree with what was actually painted.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [visible, setVisible] = useState(30);
 
   // Two calls, because the contract fixes /api/events as a bare array and
   // leaves the counters nowhere to live. They are fetched together so the
@@ -142,7 +145,7 @@ export default function FeedPage() {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(operatorToken.trim() ? { authorization: `Bearer ${operatorToken.trim()}` } : {}),
+          ...authHeaders(),
         },
         body: JSON.stringify({ action: "poll" }),
       });
@@ -164,9 +167,12 @@ export default function FeedPage() {
     }
   }
 
-  const shown = items.filter((i) =>
+  const matching = items.filter((i) =>
     filter === "all" ? true : filter === "kept" ? i.kept : !i.kept,
   );
+  // The full history is the point of the page, but a few hundred articles in
+  // one scroll is not readable. Everything is reachable, a page at a time.
+  const shown = matching.slice(0, visible);
 
   const toggle = (id: string) => {
     setExpanded((prev) => {
@@ -198,22 +204,32 @@ export default function FeedPage() {
             </p>
           </div>
 
+          {/*
+            The scan control, without a password box beside the headline. This
+            page is for anyone auditing the filter; the token it needs is the
+            one already held for the session, entered once on the console.
+          */}
           <div className="flex items-center gap-2">
-            <input
-              type="password"
-              value={operatorToken}
-              onChange={(e) => setOperatorToken(e.target.value)}
-              placeholder="OPERATOR_TOKEN"
-              title="Required to trigger a scan. Compared server side, never stored."
-              className="w-44 rounded-lg border border-[#1e2433] bg-[#0e1117]/60 px-3 py-2 font-mono-code text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-cyan-500/50 focus:outline-none focus:ring-1 focus:ring-cyan-500/40"
-            />
             <button
               onClick={scanNow}
               disabled={scanning}
-              className="rounded-lg bg-cyan-500 px-4 py-2 font-mono-code text-xs font-semibold uppercase tracking-wider text-[#04121a] transition-transform duration-100 hover:bg-cyan-400 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+              className="cursor-pointer rounded-lg bg-cyan-500 px-4 py-2 font-mono-code text-xs font-semibold uppercase tracking-wider text-[#04121a] transition-transform duration-100 hover:bg-cyan-400 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+              title={
+                hasToken
+                  ? "Runs one pass over every feed now."
+                  : "Needs the operator token — enter it once on the console."
+              }
             >
               {scanning ? "Scanning" : "Scan now"}
             </button>
+            {!hasToken && (
+              <Link
+                href="/console"
+                className="font-mono-code text-[11px] text-zinc-500 underline decoration-zinc-700 underline-offset-2 hover:text-cyan-300"
+              >
+                operator token →
+              </Link>
+            )}
           </div>
         </div>
 
@@ -391,6 +407,21 @@ export default function FeedPage() {
               </article>
             );
           })}
+
+          {matching.length > shown.length && (
+            <div className="flex flex-col items-center gap-2 pt-4">
+              <button
+                type="button"
+                onClick={() => setVisible((v) => v + 40)}
+                className="cursor-pointer rounded-xl border border-[#2d3748] px-6 py-2.5 font-mono-code text-xs font-bold text-zinc-300 transition-colors hover:border-cyan-500/50 hover:text-cyan-300"
+              >
+                Show 40 more
+              </button>
+              <span className="font-mono-code text-[10px] text-zinc-600">
+                Showing {shown.length} of {matching.length} screened
+              </span>
+            </div>
+          )}
           </div>
         </div>
       </div>

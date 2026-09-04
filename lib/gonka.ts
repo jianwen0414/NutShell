@@ -164,6 +164,139 @@ export async function resolveModels(force = false): Promise<string[]> {
   return ids;
 }
 
+/**
+ * What each model has actually done lately.
+ *
+ * Measured, and the reason this exists: the router's own catalogue is not
+ * trustworthy. On 4 Sep 2026 GET /models listed `moonshotai/Kimi-K2.6` while
+ * every inference against it returned `400 unsupported model "..."` — naming,
+ * in the error body, the two models it would serve. A health check that asks
+ * the catalogue reports a full panel; a run then fails quorum.
+ *
+ * So health is judged on outcomes. A rolling window per model, written by the
+ * call path itself, costs nothing and cannot be contradicted by the thing it
+ * is checking.
+ */
+const WINDOW = 8;
+const calls = new Map<string, Array<{ ok: boolean; at: number; detail?: string }>>();
+
+function recordCall(modelId: string, ok: boolean, detail?: string): void {
+  const log = calls.get(modelId) ?? [];
+  log.push({ ok, at: Date.now(), ...(detail ? { detail: detail.slice(0, 160) } : {}) });
+  if (log.length > WINDOW) log.shift();
+  calls.set(modelId, log);
+}
+
+export interface ModelObservation {
+  modelId: string;
+  attempts: number;
+  succeeded: number;
+  /** The most recent failure reason, when the last call failed. */
+  lastError?: string;
+}
+
+export interface GonkaHealth {
+  reachable: boolean;
+  /** Every model id the router says it serves. Not to be trusted on its own. */
+  available: string[];
+  /** The ones we resolved, one per family, in panel order. */
+  resolved: string[];
+  /** Families the router is not currently serving. */
+  missing: string[];
+  /**
+   * True when the panel cannot be relied on: a family is unresolved, or a
+   * resolved model has failed every call we have made to it recently.
+   */
+  degraded: boolean;
+  /** Models that resolve but do not answer. The case the catalogue hides. */
+  unusable: string[];
+  observed: ModelObservation[];
+  quorum: number;
+  error?: string;
+}
+
+function observations(): ModelObservation[] {
+  return [...calls.entries()].map(([modelId, log]) => {
+    const succeeded = log.filter((c) => c.ok).length;
+    const last = log[log.length - 1];
+    return {
+      modelId,
+      attempts: log.length,
+      succeeded,
+      ...(last && !last.ok && last.detail ? { lastError: last.detail } : {}),
+    };
+  });
+}
+
+/**
+ * Is the verification layer actually able to run?
+ *
+ * PRD §18 requires /api/health to report on Gonka alongside RPC, clock skew
+ * and balances, and it was the one of the four that was missing — which is how
+ * a model silently leaving the router went unnoticed. `resolveModels` already
+ * detected the degradation and wrote a console warning nobody was reading.
+ *
+ * Uses the resolver's cache rather than forcing a refresh: this is polled from
+ * page chrome, and a network round trip per poll is not worth a fresher answer
+ * to a question that changes on the order of days.
+ */
+export async function gonkaHealth(): Promise<GonkaHealth> {
+  const observed = observations();
+  const base = {
+    available: [] as string[],
+    resolved: [] as string[],
+    missing: [...MODEL_FAMILIES] as string[],
+    unusable: [] as string[],
+    observed,
+    quorum: QUORUM_MIN,
+  };
+
+  let available: string[] = [];
+  try {
+    const res = await client().models.list();
+    available = res.data.map((m) => m.id);
+  } catch (e) {
+    return {
+      ...base,
+      reachable: false,
+      degraded: true,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
+  try {
+    const resolved = await resolveModels();
+    const missing = MODEL_FAMILIES.filter(
+      (f) => !resolved.some((id) => id.toLowerCase().includes(f)),
+    );
+
+    // A model the catalogue offers but that has answered nothing we asked it.
+    const unusable = resolved.filter((id) => {
+      const o = observed.find((x) => x.modelId === id);
+      return o !== undefined && o.attempts > 0 && o.succeeded === 0;
+    });
+
+    return {
+      reachable: true,
+      available,
+      resolved,
+      missing,
+      unusable,
+      observed,
+      degraded: resolved.length < MODEL_FAMILIES.length || unusable.length > 0,
+      quorum: QUORUM_MIN,
+    };
+  } catch (e) {
+    return {
+      ...base,
+      available,
+      reachable: true,
+      degraded: true,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
 // ── Prompts ───────────────────────────────────────────────────
 
 export const ANALYST_PROMPT = `You are an impartial verification analyst assessing whether a breaking claim about
@@ -614,9 +747,13 @@ async function hedgedChat(
     if (tag === "hedge")
       console.warn(`[gonka] ${modelId}: hedge won, primary was slow`);
     return r;
-  } catch (e: any) {
-    // Promise.any only rejects when EVERY attempt failed; surface a real error.
-    throw e?.errors?.[0] ?? e;
+  } catch (e: unknown) {
+    // Promise.any only rejects when EVERY attempt failed, and it wraps the
+    // reasons in an AggregateError. Surface the first real one rather than
+    // "All promises were rejected", which names no model and no cause.
+    const first =
+      e instanceof AggregateError && e.errors.length > 0 ? e.errors[0] : undefined;
+    throw first ?? e;
   } finally {
     clearTimeout(hedgeTimer);
     for (const ac of controllers) ac.abort();
@@ -673,6 +810,7 @@ async function callAnalyst(
     console.warn(
       `[gonka] ${modelId} dropped: ${code} — ${detail.slice(0, 200)}`,
     );
+    recordCall(modelId, false, detail);
     return {
       ok: false,
       failure: {
@@ -751,6 +889,8 @@ async function callAnalyst(
         )}`,
     );
   }
+
+  recordCall(modelId, true);
 
   return {
     ok: true,

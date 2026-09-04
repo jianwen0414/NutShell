@@ -49,6 +49,21 @@ interface Health {
   book?: { reachable: boolean; orderCount: number | null; vanillaPutCount: number | null };
   clock?: { withinLimit: boolean; localSkewSeconds: number | null };
   burner?: { address: string | null; canSign: boolean };
+  gonka?: {
+    reachable: boolean;
+    resolved: string[];
+    missing: string[];
+    unusable: string[];
+    degraded: boolean;
+    quorum: number;
+    observed: Array<{
+      modelId: string;
+      attempts: number;
+      succeeded: number;
+      lastError?: string;
+    }>;
+    error?: string;
+  };
 }
 
 const TIER_COPY: Record<RiskTier, { dot: string; name: string; blurb: string }> = {
@@ -824,6 +839,13 @@ export default function ConsolePage() {
                   : `${health.clock.localSkewSeconds.toFixed(2)}s`,
                 health?.clock?.withinLimit,
               ],
+              [
+                "Verification panel",
+                health?.gonka
+                  ? `${health.gonka.resolved.length} models · quorum ${health.gonka.quorum}`
+                  : "checking",
+                health?.gonka ? !health.gonka.degraded : undefined,
+              ],
               ["Overall", health?.status ?? "checking", health?.status === "ok"],
             ].map(([label, value, ok]) => (
               <div key={String(label)} className="rounded-xl border border-zinc-800 bg-[#050b12] p-3.5">
@@ -843,6 +865,64 @@ export default function ConsolePage() {
               </div>
             ))}
           </div>
+
+          {/*
+            Per-model reality, not the router's catalogue. The catalogue has
+            been observed offering a model that rejects every call, so what is
+            shown here is what each model has actually returned.
+          */}
+          {health?.gonka && (
+            <div className="space-y-2 rounded-xl border border-zinc-800 bg-[#050b12] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-mono-code text-[10px] uppercase tracking-wider text-zinc-500">
+                  Gonka models
+                </span>
+                {health.gonka.degraded && (
+                  <span className="rounded border border-amber-500/40 bg-amber-950/50 px-2 py-0.5 font-mono-code text-[10px] font-bold text-amber-300">
+                    DEGRADED
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                {health.gonka.resolved.map((id) => {
+                  const o = health.gonka!.observed.find((x) => x.modelId === id);
+                  const dead = Boolean(o && o.attempts > 0 && o.succeeded === 0);
+                  return (
+                    <div key={id} className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                          dead ? "bg-red-500" : o?.succeeded ? "bg-emerald-400" : "bg-zinc-600"
+                        }`}
+                      />
+                      <span className="font-mono-code text-[11px] text-zinc-300">
+                        {id.split("/").pop()}
+                      </span>
+                      <span className="font-mono-code text-[10px] text-zinc-600">
+                        {o ? `${o.succeeded}/${o.attempts} recent calls` : "no calls yet"}
+                      </span>
+                      {dead && o?.lastError && (
+                        <span className="w-full truncate font-mono-code text-[10px] text-red-400/80">
+                          {o.lastError}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {health.gonka.missing.length > 0 && (
+                <p className="font-mono-code text-[10px] text-amber-300/80">
+                  Not served by the router: {health.gonka.missing.join(", ")}
+                </p>
+              )}
+              {health.gonka.unusable.length > 0 && (
+                <p className="font-mono-code text-[10px] text-red-400/80">
+                  Listed but answering nothing: {health.gonka.unusable.join(", ")}
+                </p>
+              )}
+            </div>
+          )}
 
           {health?.burner?.address && (
             <a
