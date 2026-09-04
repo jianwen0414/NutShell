@@ -24,6 +24,7 @@
     "probe:evidence": "tsx scripts/probe-evidence.ts",
     "test:investigate": "tsx scripts/test-investigate.ts",
     "measure:evidence": "tsx scripts/measure-evidence-cost.ts",
+    "probe:feeds": "tsx scripts/probe-feeds.ts",
     "probe:gonka": "tsx scripts/probe-gonka.ts",
     "diag:kimi": "tsx scripts/diag-kimi.ts",
     "verify:chain": "tsx scripts/verify-chain-link.ts",
