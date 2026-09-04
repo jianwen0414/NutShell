@@ -18,6 +18,8 @@ const nextConfig: NextConfig = {
     return [
       { source: "/feed", destination: "/signals", permanent: true },
       { source: "/portfolio", destination: "/protection", permanent: true },
+      { source: "/control", destination: "/console", permanent: true },
+      { source: "/configuration", destination: "/console", permanent: true },
       // Both of these collapsed into one incident record.
       { source: "/position/:cid", destination: "/incident/:cid", permanent: true },
       { source: "/hedge/:jobId", destination: "/incident/:jobId", permanent: true },

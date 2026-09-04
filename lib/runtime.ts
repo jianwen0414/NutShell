@@ -1,3 +1,4 @@
+import { thresholdsFromSettings } from "./settings";
 import { EventBus, InMemoryJobStore } from "@/worker/index";
 import { newJob, runJob, type Job, type PipelineEvent } from "@/worker/pipeline";
 import { SimulatedVaultDriver } from "./vault";
@@ -79,6 +80,10 @@ export async function startVerification(
     vault: v,
     ...(opts.skipInvestigation ? { skipInvestigation: true } : {}),
     emit: (jobId, ev: PipelineEvent) => bus.emit(jobId, ev),
+    // What the operator actually chose, falling back to the environment on a
+    // cold start. Without this the settings page is decorative: the pipeline
+    // reads thresholdsFromEnv() and every slider on it changes nothing.
+    thresholds: thresholdsFromSettings(),
     openHedges: openHedgesForPolicy,
     // Present only when this process holds a signing key. In `next dev` that
     // is normally the case, which is what lets the operator panel drive a

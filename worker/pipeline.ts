@@ -288,29 +288,51 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
     await advance('DECIDED', { decision });
     emit({ event: 'decision', data: decision });
 
-    // ── 3.5. Monitor Only Override ────────────────────────────────────────
-    // If the operator has configured MONITOR_ONLY mode, do not commit vault
-    // reserves or execute on-chain options. Instead, dispatch an instant
-    // Telegram push alert if suspicion reaches Truth Score >= 40.
-    if (getControlState().mode === 'MONITOR_ONLY') {
-      const truthScore = verification.consensus?.truthScore ?? 0;
-      if (truthScore >= 40 || decision.tier === 'HEDGE_SMALL' || decision.tier === 'HEDGE_FULL') {
-        try {
-          await sendTelegramAlert({
-            jobId: job.jobId,
-            alert: job.alert,
-            evidence: job.evidence,
-            verification,
-            decision,
-          });
-          emit({
-            event: 'status',
-            data: { status: 'DECIDED', step: 'monitor-alert-sent' },
-          });
-        } catch (e) {
-          console.error('[pipeline] Failed to send Telegram alert:', e);
-        }
+    // ── 3.5. Execution mode ───────────────────────────────────────────────
+    //
+    // Three modes, and until now only one of them existed here. MONITOR_ONLY
+    // was handled; APPROVAL_REQUIRED was selectable in the UI, accepted by the
+    // control route, and then ignored — so an operator who chose "the agent
+    // must not act without me" got an agent that traded anyway. That is the
+    // one bug in this file that costs money.
+    const mode = getControlState().mode;
+    const truthScore = verification.consensus?.truthScore ?? 0;
+    const wantsTrade = decision.tier === 'HEDGE_SMALL' || decision.tier === 'HEDGE_FULL';
+
+    // Worth telling somebody about: either it wants to spend, or it is
+    // interesting enough that a person would want to know unprompted.
+    const notable = wantsTrade || truthScore >= 40;
+
+    const alertOperator = async (step: string) => {
+      if (!notable) return;
+      try {
+        await sendTelegramAlert({
+          jobId: job.jobId,
+          alert: job.alert,
+          evidence: job.evidence,
+          verification,
+          decision,
+          mode,
+        });
+        emit({ event: 'status', data: { status: 'DECIDED', step } });
+      } catch (e) {
+        // An alert that fails to send must never take the run down with it.
+        console.error('[pipeline] could not send the operator alert:', e);
       }
+    };
+
+    if (mode === 'MONITOR_ONLY') {
+      // Verified, scored, recorded — and deliberately not acted on.
+      await alertOperator('monitor-alert-sent');
+      return finish(job, deps, 'DECIDED', now, emit);
+    }
+
+    if (mode === 'APPROVAL_REQUIRED' && wantsTrade && job.tradeEligible) {
+      // Hold at DECIDED. The decision, its sizing and the cap that bound it
+      // are all recorded; a human approves it from the incident record, which
+      // is token-gated and re-applies the per-trade ceiling.
+      await alertOperator('awaiting-approval');
+      emit({ event: 'status', data: { status: 'DECIDED', step: 'awaiting-approval' } });
       return finish(job, deps, 'DECIDED', now, emit);
     }
 
@@ -360,6 +382,26 @@ export async function runJob(job: Job, deps: PipelineDeps): Promise<Job> {
       } catch {
         await advance('EXECUTED');
       }
+    }
+
+    // ── 7. Tell somebody ──────────────────────────────────────────────────
+    //
+    // The receipt. Autonomous mode is the one where the agent commits real
+    // USDC without being asked, and until now it was the one mode that
+    // notified nobody — alerts only ever fired on the MONITOR_ONLY path,
+    // where by definition nothing had happened.
+    try {
+      await sendTelegramAlert({
+        jobId: job.jobId,
+        alert: job.alert,
+        evidence: job.evidence,
+        verification,
+        decision,
+        mode,
+        position,
+      });
+    } catch (e) {
+      console.error('[pipeline] could not send the fill receipt:', e);
     }
 
     await persistJobToDb(job).catch((err) => {

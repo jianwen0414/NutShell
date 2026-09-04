@@ -309,7 +309,7 @@ export default function LandingPage() {
             <Link href="/protection" className="text-zinc-500 transition-colors hover:text-zinc-300">
               Protection
             </Link>
-            <Link href="/control" className="text-zinc-500 transition-colors hover:text-zinc-300">
+            <Link href="/console" className="text-zinc-500 transition-colors hover:text-zinc-300">
               Console
             </Link>
           </div>

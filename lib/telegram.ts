@@ -6,7 +6,14 @@
  * suspicious on-chain anomalies (Truth Score >= 60).
  */
 
-import type { AlertEvent, EvidencePacket, HedgeDecision, VerificationResult } from "@/types";
+import type {
+  AlertEvent,
+  EvidencePacket,
+  HedgeDecision,
+  HedgePosition,
+  VerificationResult,
+} from "@/types";
+import type { ExecutionMode } from "./control-state";
 
 export interface TelegramAlertPayload {
   jobId: string;
@@ -14,7 +21,44 @@ export interface TelegramAlertPayload {
   evidence?: EvidencePacket;
   verification?: VerificationResult;
   decision?: HedgeDecision;
+  /**
+   * Which mode the agent was in when it decided.
+   *
+   * The alert used to be hardcoded to MONITOR_ONLY throughout — its header,
+   * its action block and its buttons — because that was the only mode that
+   * sent one. That left the two modes where the agent spends real money as
+   * the two modes that notified nobody.
+   */
+  mode?: ExecutionMode;
+  /** Present on the receipt sent after an autonomous fill. */
+  position?: HedgePosition;
 }
+
+/** What the action block says, per mode. */
+const MODE_COPY: Record<
+  ExecutionMode,
+  { icon: string; name: string; lines: string[] }
+> = {
+  MONITOR_ONLY: {
+    icon: "👁",
+    name: "MONITOR ONLY",
+    lines: ["• No funds spent.", "• No hedge executed.", "• Recorded for your review."],
+  },
+  APPROVAL_REQUIRED: {
+    icon: "✋",
+    name: "AWAITING YOUR APPROVAL",
+    lines: [
+      "• The agent has sized a hedge and stopped.",
+      "• Nothing is spent until you approve it.",
+      "• Open the record below to approve or ignore.",
+    ],
+  },
+  AUTONOMOUS: {
+    icon: "🤖",
+    name: "AUTONOMOUS",
+    lines: ["• The agent is cleared to act on this without you."],
+  },
+};
 
 export function isTelegramConfigured(): boolean {
   return Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID);
@@ -42,6 +86,8 @@ export async function sendTelegramAlert(
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
 
+  const mode: ExecutionMode = payload.mode ?? "MONITOR_ONLY";
+  const modeCopy = MODE_COPY[mode];
   const isCritical = truthScore >= 70;
   const severityTitle = isCritical ? "CRITICAL EXPLOIT DETECTED" : "ELEVATED SUSPICION DETECTED";
   const headerIcon = isCritical ? "🔴" : "🟡";
@@ -103,8 +149,7 @@ export async function sendTelegramAlert(
     `<b>${headerIcon} NUTSHELL DEFI GUARDIAN</b>`,
     `<b>${severityTitle}</b>`,
     ``,
-    `👁 <b>Mode:</b> MONITOR ONLY`,
-    `<i>No automatic trade will be executed.</i>`,
+    `${modeCopy.icon} <b>Mode:</b> ${modeCopy.name}`,
     ``,
     `━━━━━━━━━━━━━━━━━━`,
     `📊 <b>Truth Score: ${truthScore} / 100</b>`,
@@ -142,9 +187,19 @@ export async function sendTelegramAlert(
         ]
       : []),
     `<b>🛡 ACTION</b>`,
-    `👁 <b>MONITOR ONLY</b>`,
-    `• No funds spent.`,
-    `• No hedge executed.`,
+    `${modeCopy.icon} <b>${modeCopy.name}</b>`,
+    ...modeCopy.lines,
+    ...(payload.position
+      ? [
+          ``,
+          `<b>✅ FILLED</b>`,
+          `• ${payload.position.asset} $${payload.position.strike} put, ${payload.position.contracts} contracts.`,
+          `• Premium <b>$${payload.position.premiumPaidUsdc}</b> for <b>$${payload.position.notionalProtectedUsdc}</b> of cover.`,
+          ...(payload.position.wasDryRun
+            ? [`• <i>Dry run — priced and sized, nothing signed.</i>`]
+            : [`• <code>${payload.position.entryTxHash}</code>`]),
+        ]
+      : []),
     `━━━━━━━━━━━━━━━━━━`,
     `🆔 <code>${payload.jobId}</code>`,
   ].filter((line) => line !== null && line !== undefined).join("\n");
@@ -170,18 +225,20 @@ export async function sendTelegramAlert(
   const wantsTrade =
     payload.decision?.tier === "HEDGE_FULL" || payload.decision?.tier === "HEDGE_SMALL";
 
-  const inlineKeyboard: Array<Array<{ text: string; url: string }>> = incidentUrl
-    ? [
-        [
-          {
-            text: wantsTrade
-              ? "🛡 Review and approve this hedge"
-              : "🔎 Open the full incident record",
-            url: incidentUrl,
-          },
-        ],
-      ]
-    : [];
+  // The label has to match what tapping it will actually let you do. Offering
+  // "approve this hedge" in MONITOR_ONLY — which the previous version did,
+  // while the same message declared that no trade would be executed — sends
+  // the reader to a page that contradicts the alert they are holding.
+  const buttonText = !incidentUrl
+    ? null
+    : payload.position
+      ? "📄 See the filled position"
+      : mode === "APPROVAL_REQUIRED" && wantsTrade
+        ? "🛡 Review and approve this hedge"
+        : "🔎 Open the full incident record";
+
+  const inlineKeyboard: Array<Array<{ text: string; url: string }>> =
+    incidentUrl && buttonText ? [[{ text: buttonText, url: incidentUrl }]] : [];
 
   // With no NEXT_PUBLIC_APP_URL there is nowhere honest to send anyone, so the
   // message ships without buttons. It previously fell back to BaseScan's front

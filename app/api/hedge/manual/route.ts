@@ -3,7 +3,7 @@ import { cmpDecimal } from "@/lib/decimals";
 import { isAgentPaused } from "@/lib/control-state";
 import { toAppError } from "@/lib/errors";
 import { newCorrelationId } from "@/lib/ids";
-import { thresholdsFromEnv } from "@/lib/policy";
+import { thresholdsFromSettings } from "@/lib/settings";
 import { savePosition } from "@/lib/positions";
 import { persistJobToDb } from "@/lib/postgres";
 import { eventBus, jobStore } from "@/lib/runtime";
@@ -74,7 +74,9 @@ export async function POST(request: Request) {
   // 🔒 PRD §14. The policy engine caps autonomous sizing; this path bypasses
   // it by design, so the ceiling is re-applied here rather than trusted to a
   // number that arrived in a request body.
-  const ceiling = thresholdsFromEnv().hardCeilingUsdc;
+  // From the operator settings, not the environment: an operator who drops
+  // the ceiling on the console expects it to bind the approval button too.
+  const ceiling = thresholdsFromSettings().hardCeilingUsdc;
   if (cmpDecimal(budgetUsdc, ceiling) > 0) {
     return errorJson(
       "VALIDATION_FAILED",

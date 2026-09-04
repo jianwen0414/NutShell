@@ -18,8 +18,7 @@ const SHOTS: Array<{ name: string; path: string; full?: boolean; wait?: number }
   { name: "03-dashboard", path: "/dashboard", full: true, wait: 1800 },
   { name: "04-signals", path: "/signals", full: true, wait: 1800 },
   { name: "05-protection", path: "/protection", full: true, wait: 1800 },
-  { name: "06-console", path: "/control", full: true, wait: 1500 },
-  { name: "07-configuration", path: "/configuration", full: true, wait: 1200 },
+  { name: "06-console", path: "/console", full: true, wait: 1800 },
     // Takes a bare id, not a path: MSYS bash rewrites a leading slash in an
   // env var into a Windows path before tsx ever sees it.
   { name: "08-incident", path: `/incident/${process.env.INCIDENT_ID ?? "none"}`, full: true, wait: 2000 },

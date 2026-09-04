@@ -17,7 +17,7 @@ const navItems = [
   { href: "/dashboard", label: "Live Agent", match: "prefix" as const },
   { href: "/signals", label: "Signals", match: "prefix" as const },
   { href: "/protection", label: "Protection", match: "prefix" as const },
-  { href: "/control", label: "Console", match: "prefix" as const },
+  { href: "/console", label: "Console", match: "prefix" as const },
 ];
 
 /** The slice of /api/health this bar shows. */
@@ -34,17 +34,35 @@ export function Navigation() {
   // address in the chrome is the kind of detail that looks authoritative and
   // is wrong for the whole life of the demo.
   const [status, setStatus] = useState<Status | null>(null);
+  const [ingest, setIngest] = useState<{ screened: number } | null>(null);
+  const [control, setControl] = useState<{ status: string } | null>(null);
 
   useEffect(() => {
     let live = true;
-    fetch("/api/health")
-      .then((r) => r.json())
-      .then((d) => live && setStatus(d))
-      .catch(() => {});
+    const load = () => {
+      fetch("/api/health")
+        .then((r) => r.json())
+        .then((d) => live && setStatus(d))
+        .catch(() => {});
+      fetch("/api/ingest")
+        .then((r) => r.json())
+        .then((d) => live && setIngest(d))
+        .catch(() => {});
+      fetch("/api/control/status")
+        .then((r) => r.json())
+        .then((d) => live && setControl(d))
+        .catch(() => {});
+    };
+    const first = setTimeout(load, 0);
+    const repeat = setInterval(load, 20_000);
     return () => {
       live = false;
+      clearTimeout(first);
+      clearInterval(repeat);
     };
   }, []);
+
+  const armed = control?.status !== "PAUSED";
 
   return (
     <header className="sticky top-0 z-50 border-b border-[#1e2433] bg-[#090b10]/95 backdrop-blur-md">
@@ -65,13 +83,9 @@ export function Navigation() {
               BOOK: {status?.book?.vanillaPutCount ?? "—"} PUTS
             </span>
             <span className="text-zinc-600">|</span>
-            {/*
-              🔒 PRD §13.2. "Simulated environment" was wrong in the dangerous
-              direction: the vault's yield is modelled, but the premiums are
-              paid with real USDC on Base mainnet. Say both.
-            */}
-            <span className="text-amber-400/90 font-medium">
-              SIMULATED VAULT · REAL TRADES
+            <span className="text-zinc-400">
+              SCREENED:{" "}
+              <span className="text-zinc-300">{ingest?.screened?.toLocaleString() ?? "—"}</span>
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -121,12 +135,7 @@ export function Navigation() {
         <nav className="flex items-center gap-1.5 rounded-lg border border-[#1e2433] bg-[#0e1117] p-1">
           {navItems.map((item) => {
             const isActive =
-              item.match === "exact"
-                ? pathname === item.href
-                : pathname.startsWith(item.href) ||
-                  // The console is still split across two routes until they
-                  // merge; both should light the same tab.
-                  (item.href === "/control" && pathname.startsWith("/configuration"));
+              item.match === "exact" ? pathname === item.href : pathname.startsWith(item.href);
 
             return (
               <Link
@@ -144,15 +153,34 @@ export function Navigation() {
           })}
         </nav>
 
-        {/* Right Status */}
+        {/*
+          Reads the real control state. It was a fixed "AGENT ARMED" badge, so
+          the chrome announced the agent as armed on every page while it sat
+          paused — including on the page whose whole job is pausing it.
+        */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-950/20 px-3 py-1.5 text-xs font-mono-code text-emerald-400">
+          <Link
+            href="/console"
+            className={`flex items-center gap-2 rounded-md border px-3 py-1.5 font-mono-code text-xs transition-colors ${
+              armed
+                ? "border-emerald-500/30 bg-emerald-950/20 text-emerald-400 hover:bg-emerald-950/40"
+                : "border-amber-500/40 bg-amber-950/20 text-amber-300 hover:bg-amber-950/40"
+            }`}
+          >
             <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+              {armed && (
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              )}
+              <span
+                className={`relative inline-flex h-2 w-2 rounded-full ${
+                  armed ? "bg-emerald-500" : "bg-amber-500"
+                }`}
+              />
             </span>
-            <span className="font-semibold tracking-wider">AGENT ARMED</span>
-          </div>
+            <span className="font-semibold tracking-wider">
+              {control === null ? "…" : armed ? "AGENT ARMED" : "AGENT PAUSED"}
+            </span>
+          </Link>
         </div>
       </div>
     </header>
