@@ -40,7 +40,10 @@ export async function POST(request: Request) {
     case "poll": {
       // One pass, now, without starting the timer. This is what the demo uses
       // when waiting a minute for the next tick is not an option.
-      const result = await pollOnce();
+      //
+      // Forced past the pause switch: the operator asking for a scan is not
+      // the timer running unattended, and reading the news is not acting on it.
+      const result = await pollOnce({ force: true });
       return json({ result, stats: ingestStats() }, correlationId);
     }
     default:

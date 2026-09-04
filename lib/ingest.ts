@@ -3,6 +3,7 @@ import { newCorrelationId } from "./ids";
 import { startVerification } from "./runtime";
 import { fetchAllFeeds, type FeedItem } from "./feeds";
 import { sameEvent, triage, type TriageVerdict } from "./triage";
+import { isAgentPaused } from "./control-state";
 import type { AlertEvent, AlertSourceType } from "@/types";
 
 /**
@@ -156,6 +157,8 @@ export interface PollResult {
   started: number;
   errors: string[];
   seeded: boolean;
+  /** The timer fired while the operator had the agent paused, so it did not run. */
+  paused?: boolean;
   latencyMs: number;
 }
 
@@ -165,10 +168,21 @@ export interface PollResult {
  * Never throws. This runs on a timer with nobody watching, and an unhandled
  * rejection in a background interval takes the dev server with it.
  */
-export async function pollOnce(): Promise<PollResult> {
+export async function pollOnce(opts: { force?: boolean } = {}): Promise<PollResult> {
   const started = Date.now();
   const s = state();
   const seeded = s.seeding;
+
+  // The operator's pause switch stops the timer from working, not the operator
+  // from working. A scan asked for by hand still runs, so a paused agent can
+  // be shown reading the news without being able to act on it.
+  if (!opts.force && isAgentPaused()) {
+    s.lastPollAt = new Date().toISOString();
+    return {
+      fetched: 0, fresh: 0, kept: 0, started: 0,
+      errors: [], seeded, paused: true, latencyMs: Date.now() - started,
+    };
+  }
 
   try {
     const { items, results } = await fetchAllFeeds();
