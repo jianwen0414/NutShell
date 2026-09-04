@@ -32,6 +32,30 @@ export interface RadarEvent {
 /** Rejected items were never scored, so they sit here rather than at zero. */
 const BASELINE = 6;
 
+/**
+ * One geometry for the whole plot.
+ *
+ * The dots, the curve and the threshold lines each used to derive their own
+ * position — flexbox for the dots, a stretched 1000x200 viewBox for the curve,
+ * a third offset for the lines — so the curve ran about 19px below the points
+ * it was meant to join, ended short of the last one, and the hedge line missed
+ * the hedged dots by a similar margin. Everything is placed from the two
+ * functions below instead, and the viewBox is 224 units tall so that its y
+ * units are the pixels of the box.
+ */
+const PLOT_H = 224; // matches h-56 on the plot box
+const FLOOR = 24; // px above the floor where a score of zero sits
+const PER_POINT = 1.5; // px of height per truth-score point
+const PAD_L = 11; // % of width reserved on the left for the axis labels
+const PAD_R = 6; // % of width kept clear on the right for the NOW marker
+
+/** Distance from the floor of the box to the centre of a point, in px. */
+const bottomFor = (score: number) => FLOOR + score * PER_POINT;
+
+/** Horizontal position of point `i` of `n`, as a percentage of the width. */
+const xFor = (i: number, n: number) =>
+  n <= 1 ? PAD_L : PAD_L + (i * (100 - PAD_L - PAD_R)) / (n - 1);
+
 function scoreOf(e: RadarEvent): number {
   return e.outcome ? e.outcome.truthScore : BASELINE;
 }
@@ -75,24 +99,17 @@ export function ThreatRadar({
   const liveScore = live.consensus?.truthScore ?? BASELINE;
   const active = plotted.find((e) => e.id === selected) ?? null;
 
-  /**
-   * The path through the plotted scores, including the live point on the end.
-   *
-   * The dots are laid out by flexbox, so the geometry is mirrored here rather
-   * than shared: `justify-between` with padding puts point i at
-   * 5% + i * (90% / (n-1)) across, and a score sits `score * 1.55px` above a
-   * baseline 20px off the floor of a 224px box. Expressed against a 1000x200
-   * viewBox that is the same arithmetic in different units.
-   */
+  // The plotted headlines, plus the live point on the end.
+  const total = plotted.length + 1;
+
+  /** The path through the plotted scores, in the shared geometry. */
   const curve = useMemo(() => {
     const scores = [...plotted.map(scoreOf), liveScore];
     if (scores.length < 2) return null;
 
-    const H = 200;
     const points = scores.map((s, i) => ({
-      x: 50 + (i * 900) / (scores.length - 1),
-      // 224px tall box, 16px bottom padding, points rise at 1.55px per point.
-      y: Math.max(6, H - 18 - (s * 1.55 * H) / 224),
+      x: xFor(i, scores.length) * 10, // percent of the width, in viewBox units
+      y: PLOT_H - bottomFor(s),
     }));
 
     // Midpoint smoothing: each segment curves through the average of its
@@ -110,7 +127,7 @@ export function ThreatRadar({
     const endTone =
       liveScore >= 70 ? "#ef4444" : liveScore >= 40 ? "#f59e0b" : "#10b981";
 
-    return { d, endTone };
+    return { d, endTone, first: points[0].x, last: points[points.length - 1].x };
   }, [plotted, liveScore]);
 
   return (
@@ -153,7 +170,7 @@ export function ThreatRadar({
         </div>
       </div>
 
-      <div className="relative h-56 overflow-hidden rounded-2xl border border-zinc-800/50 bg-[#04070c] p-4">
+      <div className="relative h-56 overflow-hidden rounded-2xl border border-zinc-800/50 bg-[#04070c]">
         {agentPaused && !live.running && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-[#04070c]/85 p-4 text-center backdrop-blur-[1.5px]">
             <span className="flex items-center gap-2 rounded-lg border border-amber-500/50 bg-amber-950/90 px-3.5 py-1.5 font-mono-code text-xs font-bold text-amber-300">
@@ -167,32 +184,38 @@ export function ThreatRadar({
           </div>
         )}
 
-        {/*
-          Hedge threshold, on the same scale as the points. Right-aligned: the
-          left edge is where the oldest point sits, and a badge there covers it.
-        */}
-        <div
-          className="pointer-events-none absolute inset-x-0 z-0 flex justify-end px-4"
-          style={{ bottom: `${16 + 70 * 1.55}px` }}
-        >
-          <span className="-mt-3.5 rounded-md border border-red-500/60 bg-red-950/95 px-2.5 py-0.5 font-mono-code text-[10px] font-bold text-red-300">
-            HEDGE THRESHOLD · TRUTH ≥ 70
-          </span>
-        </div>
-        <div
-          className="pointer-events-none absolute inset-x-0 z-0 border-b border-dashed border-red-500/50"
-          style={{ bottom: `${16 + 70 * 1.55}px` }}
-        />
-        <div
-          className="pointer-events-none absolute inset-x-0 z-0 border-b border-dashed border-amber-500/25"
-          style={{ bottom: `${16 + 40 * 1.55}px` }}
-        />
-
         <div className="pointer-events-none absolute inset-0 grid grid-cols-6 grid-rows-4 opacity-10">
           {Array.from({ length: 24 }).map((_, i) => (
             <div key={i} className="border-b border-r border-cyan-500" />
           ))}
         </div>
+
+        {/*
+          The tier thresholds, on the same scale as the points, labelled in a
+          gutter down the left. The label used to be a badge floated to the
+          right of its line, where it landed on top of whichever point happened
+          to be there — which in a hedged run is the point worth looking at.
+        */}
+        {[
+          { score: 70, line: "border-red-500/50", text: "text-red-300/90" },
+          { score: 40, line: "border-amber-500/25", text: "text-amber-300/70" },
+        ].map((t) => (
+          <div
+            key={t.score}
+            className="pointer-events-none absolute inset-x-0 z-0"
+            style={{ bottom: `${bottomFor(t.score)}px` }}
+          >
+            <div
+              className={`absolute top-0 border-b border-dashed ${t.line}`}
+              style={{ left: `${PAD_L - 4}%`, right: 0 }}
+            />
+            <span
+              className={`absolute left-2 top-0 -translate-y-1/2 font-mono-code text-[10px] font-bold ${t.text}`}
+            >
+              ≥ {t.score}
+            </span>
+          </div>
+        ))}
 
         {/*
           The curve through the points.
@@ -207,7 +230,7 @@ export function ThreatRadar({
         {curve && (
           <svg
             className="pointer-events-none absolute inset-0 h-full w-full"
-            viewBox="0 0 1000 200"
+            viewBox={`0 0 1000 ${PLOT_H}`}
             preserveAspectRatio="none"
             aria-hidden="true"
           >
@@ -222,7 +245,11 @@ export function ThreatRadar({
                 <stop offset="100%" stopColor={curve.endTone} stopOpacity="0.02" />
               </linearGradient>
             </defs>
-            <path d={`${curve.d} L 1000,200 L 0,200 Z`} fill="url(#radarFill)" />
+            {/* Closed against the floor under the first and last points only. */}
+            <path
+              d={`${curve.d} L ${curve.last.toFixed(1)},${PLOT_H} L ${curve.first.toFixed(1)},${PLOT_H} Z`}
+              fill="url(#radarFill)"
+            />
             <path
               d={curve.d}
               fill="none"
@@ -235,8 +262,14 @@ export function ThreatRadar({
           </svg>
         )}
 
-        <div className="absolute inset-0 flex items-end justify-between gap-1 px-5 pb-4">
-          {plotted.map((e) => {
+        {/*
+          The points. Each is centred on its coordinate — bottom puts its lower
+          edge on the score, translate-y-1/2 pushes it down by half its height —
+          and the time label hangs off it absolutely, so the label never shifts
+          the dot it belongs to.
+        */}
+        <div className="absolute inset-0">
+          {plotted.map((e, i) => {
             const score = scoreOf(e);
             const tone = toneOf(score, e.kept);
             const isSel = selected === e.id;
@@ -245,19 +278,19 @@ export function ThreatRadar({
                 key={e.id}
                 type="button"
                 onClick={() => setSelected(isSel ? null : e.id)}
-                className={`group flex cursor-pointer flex-col items-center transition-transform ${
+                className={`group absolute z-[1] -translate-x-1/2 translate-y-1/2 cursor-pointer transition-transform ${
                   isSel ? "scale-125" : "hover:scale-110"
                 }`}
-                style={{ transform: `translateY(-${score * 1.55}px)` }}
+                style={{ left: `${xFor(i, total)}%`, bottom: `${bottomFor(score)}px` }}
                 title={e.title}
               >
                 <span
-                  className={`flex h-3 w-3 items-center justify-center rounded-full border-2 ${
+                  className={`block h-3 w-3 rounded-full border-2 ${
                     isSel ? "border-white bg-cyan-400 ring-4 ring-cyan-400/40" : tone.dot
                   }`}
                 />
                 <span
-                  className={`mt-1 font-mono-code text-[10px] ${
+                  className={`absolute left-1/2 top-full mt-1 -translate-x-1/2 font-mono-code text-[10px] ${
                     isSel ? "font-bold text-cyan-300" : "text-zinc-600 group-hover:text-cyan-300"
                   }`}
                 >
@@ -269,8 +302,11 @@ export function ThreatRadar({
 
           {/* Now. */}
           <div
-            className="flex flex-col items-center"
-            style={{ transform: `translateY(-${liveScore * 1.55}px)` }}
+            className="absolute z-[1] -translate-x-1/2 translate-y-1/2"
+            style={{
+              left: `${xFor(total - 1, total)}%`,
+              bottom: `${bottomFor(liveScore)}px`,
+            }}
           >
             <span
               className={`flex h-5 w-5 items-center justify-center rounded-full border-2 ${
@@ -293,7 +329,8 @@ export function ThreatRadar({
                 }`}
               />
             </span>
-            <span className="mt-1 whitespace-nowrap rounded border border-zinc-700 bg-zinc-900/90 px-2 py-0.5 font-mono-code text-[10px] font-bold text-white">
+            {/* Right-aligned: it is the widest label and sits closest to the edge. */}
+            <span className="absolute right-0 top-full mt-1 whitespace-nowrap rounded border border-zinc-700 bg-zinc-900/90 px-2 py-0.5 font-mono-code text-[10px] font-bold text-white">
               {agentPaused
                 ? "NOW · PAUSED"
                 : live.consensus
