@@ -35,3 +35,6 @@ npm-debug.log*
 # Local measurement, probe output, and the file-backed position store
 /artifacts/
 .shots/
+
+# Presentation notes, kept out of the repo.
+docs/DEMO-FLOW.md

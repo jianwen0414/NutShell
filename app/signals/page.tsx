@@ -330,8 +330,25 @@ export default function FeedPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0">
+                        {/*
+                          A promoted headline is the entry point to its own
+                          record, so the headline itself is the link. It used to
+                          be a small "Verification record" anchor hidden inside
+                          the expanded detail, pointing at the raw JSON route —
+                          written before /incident existed — so nothing on this
+                          page led anywhere a reader would want to go.
+                        */}
                         <h2 className="truncate text-[15px] font-semibold leading-snug text-zinc-100">
-                          {item.title}
+                          {item.jobId ? (
+                            <Link
+                              href={`/incident/${item.jobId}`}
+                              className="transition-colors hover:text-cyan-300 hover:underline decoration-cyan-500/40 underline-offset-2"
+                            >
+                              {item.title}
+                            </Link>
+                          ) : (
+                            item.title
+                          )}
                         </h2>
                         <div className="mt-1 flex items-center gap-2 font-mono-code text-[11px] text-zinc-500">
                           <span>{item.source.name}</span>
@@ -387,14 +404,12 @@ export default function FeedPage() {
                             </a>
                           )}
                           {item.jobId && (
-                            <a
-                              href={`/api/verify/${item.jobId}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-cyan-400 transition-colors hover:text-cyan-300"
+                            <Link
+                              href={`/incident/${item.jobId}`}
+                              className="font-semibold text-cyan-400 transition-colors hover:text-cyan-300"
                             >
-                              Verification record
-                            </a>
+                              Open the full record →
+                            </Link>
                           )}
                           <span className="text-zinc-600">
                             Seen {relative(item.ingestedAt)}

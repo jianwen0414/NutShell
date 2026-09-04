@@ -26,6 +26,14 @@ export async function register() {
       if (items > 0) {
         console.info(`[seed] ${items} headlines laid down, ${worked} worked through to a decision.`);
       }
+
+      // Positions opened by an operator script have no job behind them, so
+      // their incident record would show a real fill above five empty stages.
+      const { seedPositionRecords } = await import("./lib/position-records");
+      const rebuilt = await seedPositionRecords();
+      if (rebuilt > 0) {
+        console.info(`[seed] ${rebuilt} stored position(s) given their reasoning chain.`);
+      }
     } catch (e) {
       // Seeding is a convenience. It must never stop the server booting.
       console.error("[seed] could not seed the demo corpus:", e);
