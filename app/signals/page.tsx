@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Navigation } from "@/components/navigation";
 
 /**
  * Stage 01 — what the system read and what it did about it.
@@ -91,8 +92,11 @@ export default function FeedPage() {
   const [scanning, setScanning] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const expandedRef = useRef<Set<string>>(new Set());
-  const [, forceRender] = useState(0);
+  // Expansion is rendered state, so it lives in state. It was held in a ref
+  // alongside a force-render counter, which means reading the ref during
+  // render — the pattern the React compiler flags, because a ref mutated
+  // outside a commit can disagree with what was actually painted.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   // Two calls, because the contract fixes /api/events as a bare array and
   // leaves the counters nowhere to live. They are fetched together so the
@@ -114,9 +118,20 @@ export default function FeedPage() {
   }, []);
 
   useEffect(() => {
-    void load();
-    const t = setInterval(() => void load(), 15_000);
-    return () => clearInterval(t);
+    // The first pass goes through the same scheduler as the rest rather than
+    // running inline. Calling it in the effect body sets state synchronously
+    // during the commit, which cascades a second render before paint.
+    let cancelled = false;
+    const tick = () => {
+      if (!cancelled) void load();
+    };
+    const first = setTimeout(tick, 0);
+    const repeat = setInterval(tick, 15_000);
+    return () => {
+      cancelled = true;
+      clearTimeout(first);
+      clearInterval(repeat);
+    };
   }, [load]);
 
   async function scanNow() {
@@ -154,15 +169,19 @@ export default function FeedPage() {
   );
 
   const toggle = (id: string) => {
-    const set = expandedRef.current;
-    if (set.has(id)) set.delete(id);
-    else set.add(id);
-    forceRender((n) => n + 1);
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   return (
-    <div className="min-h-screen bg-[#070e17]">
-      <div className="mx-auto max-w-[1560px] px-4 py-8 sm:px-6 lg:px-10">
+    <>
+      <Navigation />
+      <div className="min-h-screen bg-[#070e17]">
+        <div className="mx-auto max-w-[1560px] px-4 py-8 sm:px-6 lg:px-10">
         {/* Heading */}
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -283,7 +302,7 @@ export default function FeedPage() {
           )}
 
           {shown.map((item) => {
-            const open = expandedRef.current.has(item.id);
+            const open = expanded.has(item.id);
             return (
               <article
                 key={item.id}
@@ -372,8 +391,9 @@ export default function FeedPage() {
               </article>
             );
           })}
+          </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }

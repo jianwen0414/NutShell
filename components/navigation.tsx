@@ -5,12 +5,19 @@ import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
+/**
+ * Five destinations, each answering a different question.
+ *
+ * Verify is first because PRD §13.1 puts it at `/` and because it is the one
+ * screen a stranger is asked to use. Console is last because it is the only
+ * one that belongs to us rather than to a user.
+ */
 const navItems = [
-  { href: "/", label: "Dashboard" },
-  { href: "/feed", label: "Signals" },
-  { href: "/control", label: "Control" },
-  { href: "/configuration", label: "Configuration" },
-  { href: "/portfolio", label: "Portfolio" },
+  { href: "/", label: "Verify", match: "exact" as const },
+  { href: "/dashboard", label: "Live Agent", match: "prefix" as const },
+  { href: "/signals", label: "Signals", match: "prefix" as const },
+  { href: "/protection", label: "Protection", match: "prefix" as const },
+  { href: "/control", label: "Console", match: "prefix" as const },
 ];
 
 /** The slice of /api/health this bar shows. */
@@ -114,9 +121,12 @@ export function Navigation() {
         <nav className="flex items-center gap-1.5 rounded-lg border border-[#1e2433] bg-[#0e1117] p-1">
           {navItems.map((item) => {
             const isActive =
-              item.href === "/"
-                ? pathname === "/" || pathname === "/dashboard"
-                : pathname.startsWith(item.href);
+              item.match === "exact"
+                ? pathname === item.href
+                : pathname.startsWith(item.href) ||
+                  // The console is still split across two routes until they
+                  // merge; both should light the same tab.
+                  (item.href === "/control" && pathname.startsWith("/configuration"));
 
             return (
               <Link

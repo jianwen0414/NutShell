@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { errorJson, json } from "@/lib/api";
-import { isAgentPaused } from "@/lib/control-state";
 import { newCorrelationId } from "@/lib/ids";
 import { startVerification } from "@/lib/runtime";
 import type { AlertEvent, AlertSourceType } from "@/types";
@@ -12,18 +11,16 @@ import type { AlertEvent, AlertSourceType } from "@/types";
  * That is enforced when the job is created, not checked later: `newJob` marks
  * a USER_PASTE alert ineligible to trade, so no downstream change can turn a
  * public paste into a position.
+ *
+ * 🔒 Deliberately NOT gated on the agent's pause switch, though it used to be.
+ * Pausing stops the agent acting on its own; it does not stop a person asking
+ * a question, and this route cannot act on anything. Gating it meant the
+ * mandatory public deliverable (PRD §2) went dark the moment an operator hit
+ * pause — which is exactly what an operator does before a demo. Same reasoning
+ * the ingest route already applies to an operator-forced scan.
  */
 export async function POST(request: Request) {
   const correlationId = newCorrelationId();
-
-  if (isAgentPaused()) {
-    return errorJson(
-      "AGENT_PAUSED",
-      "Autonomous agent is currently PAUSED. Resume the agent in the Control Center to run investigations.",
-      correlationId,
-      { status: 423 }
-    );
-  }
 
   const body = await request.json().catch(() => null);
 

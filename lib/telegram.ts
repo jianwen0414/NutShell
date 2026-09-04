@@ -154,35 +154,40 @@ export async function sendTelegramAlert(
     ? configuredAppUrl.replace(/\/$/, "")
     : null;
 
-  const detailsUrl = appUrl ? `${appUrl}/?jobId=${payload.jobId}#stage-02_INVESTIGATE` : "https://basescan.org";
-  const hedgeUrl = appUrl ? `${appUrl}/hedge/${payload.jobId}` : "https://basescan.org";
+  /**
+   * One destination, because there is now one page that holds the whole
+   * record: the claim, the chain evidence, all three verdicts, the decision
+   * with its binding cap, and — when the mode calls for approval — the button
+   * that actually executes.
+   *
+   * It used to be two buttons. The first pointed at `/?jobId=…`, which the
+   * dashboard never read, so it landed on an idle page with none of this
+   * incident on it. The second pointed at a page whose execute route had no
+   * authentication. Both are fixed; both now resolve here.
+   */
+  const incidentUrl = appUrl ? `${appUrl}/incident/${payload.jobId}` : null;
 
-  const isEligibleForManualHedge =
-    truthScore >= 70 ||
-    payload.decision?.tier === "HEDGE_FULL" ||
-    payload.decision?.tier === "HEDGE_SMALL";
+  const wantsTrade =
+    payload.decision?.tier === "HEDGE_FULL" || payload.decision?.tier === "HEDGE_SMALL";
 
-  const inlineKeyboard: Array<Array<{ text: string; url: string }>> = [
-    [
-      {
-        text: appUrl ? "🔎 1. View Complete Investigation" : "🔎 1. View Investigation (BaseScan)",
-        url: detailsUrl,
-      },
-    ],
-  ];
+  const inlineKeyboard: Array<Array<{ text: string; url: string }>> = incidentUrl
+    ? [
+        [
+          {
+            text: wantsTrade
+              ? "🛡 Review and approve this hedge"
+              : "🔎 Open the full incident record",
+            url: incidentUrl,
+          },
+        ],
+      ]
+    : [];
 
-  if (isEligibleForManualHedge) {
-    inlineKeyboard.push([
-      {
-        text: appUrl ? "🛡 2. Execute Manual Put Option (Thetanuts)" : "🛡 2. Execute Put Option (Thetanuts)",
-        url: hedgeUrl,
-      },
-    ]);
-  }
-
-  const replyMarkup = {
-    inline_keyboard: inlineKeyboard,
-  };
+  // With no NEXT_PUBLIC_APP_URL there is nowhere honest to send anyone, so the
+  // message ships without buttons. It previously fell back to BaseScan's front
+  // page dressed up as "View Investigation", which is a link that answers a
+  // question nobody asked.
+  const replyMarkup = inlineKeyboard.length > 0 ? { inline_keyboard: inlineKeyboard } : undefined;
 
   if (!token || !chatId) {
     console.info(

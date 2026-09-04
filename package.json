@@ -44,11 +44,13 @@
   "dependencies": {
     "@thetanuts-finance/thetanuts-client": "^0.3.0",
     "ethers": "^6.13.0",
+    "gsap": "^3.15.0",
     "next": "16.3.3",
     "openai": "^4.77.0",
     "pg": "^8.23.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "three": "^0.185.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -57,6 +59,7 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.185.4",
     "eslint": "^9",
     "eslint-config-next": "16.3.3",
     "tailwindcss": "^4",
