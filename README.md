@@ -22,7 +22,7 @@ downside protection.
 
 | Route | What it is |
 |---|---|
-| `/` | **Verify.** Paste any claim, get three named models scoring it live with their Gonka request ids. No wallet, no signup, nothing traded. |
+| `/` | **Verify.** Paste any claim, get three named models scoring it live with their Gonka request ids. No wallet, no signup, nothing traded. Carries the gate explorer: drag model agreement under the floor and watch the same truth score stop buying anything. |
 | `/dashboard` | **Live agent.** Suspicion timeline over everything read, and the six-stage pipeline as it runs. |
 | `/signals` | **Signal intake.** Every headline screened, including the rejections and the reason each was dropped. |
 | `/incident/[id]` | **One incident, end to end.** Claim → chain evidence → three verdicts → consensus → decision with its binding cap → fill → attestation, under one correlation id. |

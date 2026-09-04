@@ -25,6 +25,8 @@ import { loadEnv } from '../lib/env';
 import { config } from '../lib/config';
 import { newCorrelationId, toAppError } from '../lib/errors';
 import { executeHedge } from '../lib/thetanuts';
+import { selectTier } from '../lib/policy';
+import { thresholdsFromSettings } from '../lib/settings';
 import type { ActionTier, ExecutedPosition } from '../types/index';
 
 loadEnv();
@@ -39,30 +41,17 @@ const asset = (flag('asset') ?? 'ETH').toUpperCase();
 const budgetUsdc = flag('budget') ?? String(config.hardCeilingUsdc);
 
 /**
- * PRD §10.4 policy matrix.
+ * The real policy engine, not a copy of it.
  *
- * ⚠️ STAND-IN. The policy engine is `lib/policy.ts`, which is M2's surface.
- * This is the matrix transcribed so the beat is runnable today; it must be
- * replaced by a call into the real engine, not duplicated permanently.
+ * This used to be the PRD §10.4 matrix transcribed by hand, carrying its own
+ * note that it "must be replaced by a call into the real engine, not
+ * duplicated permanently". It now calls selectTier directly, against whatever
+ * thresholds the operator has configured — so this beat cannot quietly stop
+ * agreeing with the agent the day a threshold moves, which is the failure mode
+ * a transcription has and a call does not.
  */
-function tierFor(truthScore: number, agreement: number, severity: number): { tier: ActionTier; reason: string } {
-  if (truthScore < 40) return { tier: 'REJECT', reason: `Truth score ${truthScore} is below 40 — logged, no action.` };
-  if (truthScore < 70) return { tier: 'WATCH', reason: `Truth score ${truthScore} is in the 40–69 band — radar only.` };
-  if (agreement < Number(process.env.AGREEMENT_THRESHOLD ?? 0.6)) {
-    return {
-      tier: 'ESCALATE',
-      reason:
-        `Truth score ${truthScore} clears the bar, but the models only agree ${(agreement * 100).toFixed(0)}% ` +
-        `— below the ${(Number(process.env.AGREEMENT_THRESHOLD ?? 0.6) * 100).toFixed(0)}% floor. ` +
-        'Escalate; degrade to WATCH if debate mode is unavailable.',
-    };
-  }
-  if (severity <= 2) return { tier: 'WATCH', reason: `Severity ${severity} is contained — no hedge.` };
-  if (truthScore >= Number(process.env.TRUTH_THRESHOLD_FULL ?? 85) && agreement >= Number(process.env.AGREEMENT_THRESHOLD_FULL ?? 0.75) && severity >= 4) {
-    return { tier: 'HEDGE_FULL', reason: `Truth ${truthScore}, agreement ${(agreement * 100).toFixed(0)}%, severity ${severity} — full hedge.` };
-  }
-  return { tier: 'HEDGE_SMALL', reason: `Truth ${truthScore}, agreement ${(agreement * 100).toFixed(0)}%, severity ${severity} — small hedge.` };
-}
+const tierFor = (truthScore: number, agreement: number, severity: number) =>
+  selectTier(truthScore, agreement, severity as 1 | 2 | 3 | 4 | 5, thresholdsFromSettings());
 
 const TIER_MULTIPLIER: Record<ActionTier, number> = {
   REJECT: 0,

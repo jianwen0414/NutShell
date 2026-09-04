@@ -467,6 +467,22 @@ export default function ProtectionPage() {
                 </div>
               </div>
 
+              {/*
+                Measured on the first fill, and absent from the PRD entirely:
+                OrderFilled reported feeCollected 0.062499 on a premium of
+                0.499999. It sits inside the quoted price rather than on top of
+                it, so the premium shown is what was paid — but a reader
+                comparing our cost of cover against a raw quote elsewhere should
+                know where the difference goes.
+              */}
+              <p className="rounded-xl border border-zinc-800 bg-[#03070c] p-4 font-sans text-[11px] leading-relaxed text-zinc-400">
+                <span className="font-bold text-zinc-300">On the fee.</span> The protocol
+                takes <strong className="text-zinc-300">12.5% of each premium</strong>, inside
+                the quoted price rather than added to it — measured on our first fill, where
+                a $0.499999 premium carried $0.062499 of fee. The maker nets the other
+                87.5%. Every figure on this page is the price actually paid, fee included.
+              </p>
+
               <p className="rounded-xl border border-zinc-800 bg-[#03070c] p-4 font-sans text-[11px] leading-relaxed text-zinc-400">
                 <span className="font-bold text-zinc-300">On early exit.</span> A long put has no
                 way out on this venue before expiry. Measured against a real open position:{" "}

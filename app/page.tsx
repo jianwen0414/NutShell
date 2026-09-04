@@ -5,6 +5,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { useCallback, useRef } from "react";
 import { ProofStrip } from "@/components/landing/proof-strip";
+import { GateExplorer } from "@/components/landing/gate-explorer";
 import { VerifyConsole } from "@/components/verification/verify-console";
 
 /**
@@ -211,6 +212,26 @@ export default function LandingPage() {
           </div>
 
           <VerifyConsole />
+        </section>
+
+        {/* ── The gate ──────────────────────────────────────────────────── */}
+        <section className="mx-auto max-w-4xl px-5 pb-16 sm:px-8">
+          <div className="mb-6 space-y-3">
+            <div className="font-mono-code text-[10px] font-bold uppercase tracking-[0.24em] text-amber-400">
+              Why three models and not one
+            </div>
+            <h2 className="font-mono-code text-2xl font-black tracking-tight text-white sm:text-3xl">
+              Agreement is what stops the spending
+            </h2>
+            <p className="max-w-2xl text-sm leading-relaxed text-zinc-400">
+              A claim can be credible and still be wrong, and the tell is usually that
+              the models stop agreeing. Below are two readings of one event, priced
+              against the same book: the report, and the correction. The truth score is
+              identical in both. Only the agreement moves — and it is what decides
+              whether any money leaves the wallet.
+            </p>
+          </div>
+          <GateExplorer />
         </section>
 
         {/* ── How ───────────────────────────────────────────────────────── */}
