@@ -1,14 +1,21 @@
 /**
  * Stage 01 — where alerts actually come from.
  *
- * Four public crypto news feeds, polled on a timer. No API key, no signup, no
- * rate limit worth worrying about: RSS is a twenty year old open format and
- * every one of these publishers still serves it.
+ * Public crypto news feeds, polled on a timer. No API key, no signup, no rate
+ * limit worth worrying about: RSS is a twenty year old open format and every
+ * one of these publishers still serves it.
  *
- * X was the obvious first choice and is not viable. Reading the firehose costs
- * $200 a month for the lowest paid tier, and the free tier cannot search. The
- * ingestion path here is source agnostic, so a social feed can be added later
- * by writing one adapter that returns FeedItem; nothing downstream changes.
+ * These are journalism, so they carry a lag of minutes to hours behind an
+ * incident. That is worth stating plainly, because the faster sources people
+ * assume exist do not: PeckShield and CertiK publish alerts only on X, and
+ * their Telegram mirrors have been dead since 2021 and 2022. Forta and
+ * CryptoPanic need paid keys, rekt.news and the SlowMist API return errors,
+ * and every Nitter instance is gone. Searched 3 Sep 2026.
+ *
+ * So this layer buys breadth, not speed. Speed on Base comes from reading the
+ * chain directly, which stage 02 already does. The ingestion path is source
+ * agnostic, so a faster feed can be added later as one adapter returning
+ * FeedItem, and nothing downstream changes.
  *
  * Nothing in this file decides whether an item matters. It fetches and it
  * normalises. Triage is a separate module so it can be tested without network.
@@ -22,14 +29,27 @@ export interface FeedSource {
 }
 
 /**
- * Confirmed live on 3 Sep 2026. CoinDesk and Blockworks both answer 308 to a
- * plain GET and are deliberately absent rather than left in to fail forever.
+ * Every one confirmed serving items on 4 Sep 2026.
+ *
+ * Absent on purpose: Blockworks answers 308 to every path tried, Bankless
+ * publishes on a multi-day cycle so its newest item is routinely older than
+ * the freshness window, and U.Today carries volume without the editorial
+ * standard the triage gates assume.
  */
 export const FEED_SOURCES: FeedSource[] = [
   { id: "cointelegraph", name: "Cointelegraph", url: "https://cointelegraph.com/rss" },
   { id: "theblock", name: "The Block", url: "https://www.theblock.co/rss.xml" },
   { id: "decrypt", name: "Decrypt", url: "https://decrypt.co/feed" },
   { id: "cryptoslate", name: "CryptoSlate", url: "https://cryptoslate.com/feed/" },
+  // CoinDesk answers 308 on its bare feed path; the explicit outputType works.
+  {
+    id: "coindesk",
+    name: "CoinDesk",
+    url: "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
+  },
+  { id: "defiant", name: "The Defiant", url: "https://thedefiant.io/api/feed" },
+  { id: "bitcoincom", name: "Bitcoin.com News", url: "https://news.bitcoin.com/feed/" },
+  { id: "ambcrypto", name: "AMBCrypto", url: "https://ambcrypto.com/feed/" },
 ];
 
 /** A published article, normalised across publishers. */
@@ -58,7 +78,7 @@ const HEADERS = {
 
 // ── XML ───────────────────────────────────────────────────────────────────
 //
-// Hand written rather than pulled from a parser package. These four feeds are
+// Hand written rather than pulled from a parser package. Every feed here is
 // flat RSS 2.0: a list of <item>, each holding text children. A dependency
 // would buy namespace handling and streaming that nothing here needs.
 
@@ -195,8 +215,8 @@ export async function fetchFeed(source: FeedSource): Promise<FeedResult> {
 /**
  * Every feed at once, newest first.
  *
- * Parallel because four sequential fetches would put the slowest publisher in
- * series with the other three for no reason.
+ * Parallel because sequential fetches would put the slowest publisher in
+ * series with all the others for no reason.
  */
 export async function fetchAllFeeds(
   sources: FeedSource[] = FEED_SOURCES,

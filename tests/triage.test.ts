@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { triage } from "../lib/triage";
+import { sameEvent, triage } from "../lib/triage";
 import type { FeedItem } from "../lib/feeds";
 
 const NOW = new Date("2026-09-03T12:00:00.000Z");
@@ -121,5 +121,134 @@ describe("triage reporting", () => {
 
     expect(kept.reason.length).toBeGreaterThan(0);
     expect(dropped.reason.length).toBeGreaterThan(0);
+  });
+});
+
+describe("sameEvent", () => {
+  it("matches one incident written up by different publishers", () => {
+    expect(
+      sameEvent(
+        "Morpho on Base halted after $23M drained via oracle manipulation",
+        "Base lender Morpho drained of $23M in oracle manipulation attack",
+      ),
+    ).toBe(true);
+  });
+
+  it("matches a terse headline against a verbose one", () => {
+    // Scored against the smaller set, so a short headline fully contained in a
+    // long one counts as the same event rather than scoring low on Jaccard.
+    expect(
+      sameEvent(
+        "Aerodrome pool drained",
+        "Aerodrome liquidity pool drained by attacker in early morning exploit on Base",
+      ),
+    ).toBe(true);
+  });
+
+  it("separates two different incidents that share vocabulary", () => {
+    expect(
+      sameEvent(
+        "Morpho on Base drained of $23M in exploit",
+        "Curve pool on Ethereum drained of $8M in exploit",
+      ),
+    ).toBe(false);
+  });
+
+  it("separates two incidents at the same protocol on different days", () => {
+    expect(
+      sameEvent(
+        "Aerodrome pool drained in oracle attack",
+        "Aerodrome announces governance vote on fee structure",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not match on stopwords alone", () => {
+    expect(sameEvent("The report after the new says", "A report for the new says")).toBe(false);
+  });
+
+  it("handles an empty or punctuation only headline without matching", () => {
+    expect(sameEvent("", "Morpho drained")).toBe(false);
+    expect(sameEvent("...", "Morpho drained")).toBe(false);
+  });
+});
+
+describe("triage and price direction", () => {
+  it("drops a rally headline even when it names liquidations", () => {
+    // Liquidations are heaviest when the market moves hard, in either
+    // direction, so the word alone cannot tell a crash from a rally.
+    const v = triage(
+      item({ title: "Bitcoin Spikes Above $82K After Heavy Short Liquidations" }),
+      NOW,
+    );
+
+    expect(v.keep).toBe(false);
+    expect(v.reason).toMatch(/price rise/i);
+  });
+
+  it("still keeps a fall described with the same vocabulary", () => {
+    const v = triage(
+      item({ title: "Bitcoin plunged below $60K as long liquidations cascaded" }),
+      NOW,
+    );
+
+    expect(v.keep).toBe(true);
+    expect(v.asset).toBe("BTC");
+  });
+
+  it("does not let a rally word rescue an item that fails an earlier gate", () => {
+    const v = triage(item({ title: "Ethereum climbs on ETF inflows" }), NOW);
+    expect(v.keep).toBe(false);
+  });
+});
+
+describe("triage maps the asset from the headline", () => {
+  it("drops a story whose asset appears only in the body", () => {
+    // Measured case: a lawsuit about Tether freezing USDT, where "Ethereum"
+    // appears once describing which addresses held it. Hedging ETH over that
+    // would be a position taken on scenery.
+    const v = triage(
+      item({
+        title: "Tether Froze $42.4 Million Three Months Before A Seizure Warrant",
+        summary:
+          "Two Thai businessmen are suing Tether over 42,417,785 USDT blacklisted across 10 Ethereum addresses.",
+      }),
+      NOW,
+    );
+
+    expect(v.keep).toBe(false);
+    expect(v.asset).toBeNull();
+    expect(v.reason).toMatch(/headline names no asset/i);
+  });
+
+  it("keeps a story whose asset is in the headline", () => {
+    const v = triage(
+      item({
+        title: "Ethereum bridge drained in $41M exploit",
+        summary: "The attacker moved funds across seven transactions.",
+      }),
+      NOW,
+    );
+
+    expect(v.keep).toBe(true);
+    expect(v.asset).toBe("ETH");
+  });
+
+  it("still finds threat vocabulary in the body, only the asset is headline bound", () => {
+    // The threat gate reads title and summary together on purpose. Only the
+    // asset decision narrowed, and the protocol named in the headline is
+    // enough to resolve one.
+    const v = triage(
+      item({
+        title: "Aerodrome incident under investigation",
+        summary: "The pool was drained of roughly 5,200 WETH before trading halted.",
+      }),
+      NOW,
+    );
+
+    expect(v.matched).toContain("drained");
+    expect(v.asset).toBe("ETH");
+    expect(v.mappingRule).toBe("CONTAGION");
+    expect(v.keep).toBe(true);
   });
 });

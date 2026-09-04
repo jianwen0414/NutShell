@@ -65,6 +65,25 @@ const SPECULATION_TERMS = [
   "vs", "versus", "history of", "anniversary", "recap", "weekly", "roundup",
 ];
 
+/**
+ * Words that mark a price move upward.
+ *
+ * Measured, and the reason this gate exists: "Bitcoin Spikes Above $82K After
+ * Heavy Short Liquidations" passed every other gate, because `liquidations`
+ * is in the solvency list and BTC is hedgeable. Liquidations happen in both
+ * directions and are heaviest exactly when the market is moving hard, so the
+ * threat vocabulary alone cannot tell a crash from a rally.
+ *
+ * Nobody buys downside protection because an asset went up, so a headline
+ * framed as a rise is not an event this system acts on.
+ */
+const RALLY_TERMS = [
+  "spikes", "spike", "surges", "surge", "soars", "soar", "rallies", "rally",
+  "jumps", "jump", "climbs", "climb", "rises", "rise", "gains", "gain",
+  "tops", "breaks above", "above", "high", "highs", "record", "bullish",
+  "recovers", "rebound", "rebounds", "up",
+];
+
 /** Nothing older than this is actionable. Feeds carry a long tail. */
 const MAX_AGE_HOURS = Number(process.env.TRIAGE_MAX_AGE_HOURS ?? 24);
 
@@ -88,6 +107,50 @@ function matchedTerms(text: string): string[] {
     }
   }
   return hits;
+}
+
+/**
+ * Words carrying no identifying weight. Kept deliberately short: this list
+ * exists to stop two unrelated headlines matching on "the" and "after", not to
+ * do real linguistics.
+ */
+const STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "for", "of", "to", "in", "on", "at",
+  "by", "from", "with", "as", "is", "are", "was", "were", "be", "been", "it",
+  "its", "this", "that", "these", "those", "after", "before", "over", "amid",
+  "into", "out", "up", "down", "new", "says", "said", "report", "reports",
+]);
+
+/** Identifying words in a headline: lowercase, punctuation gone, stopwords out. */
+export function significantTokens(title: string): Set<string> {
+  return new Set(
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9$\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !STOPWORDS.has(w)),
+  );
+}
+
+/**
+ * Do two headlines describe the same event?
+ *
+ * One exploit is written up by every publisher on the list, each with its own
+ * wording, so a hash of the title makes eight distinct clusters out of one
+ * incident and pays for eight verifications of it. Overlap of the identifying
+ * words is a cheap way to notice, and it is checked before any model is called
+ * rather than after.
+ *
+ * Scored against the smaller headline, not the union. A terse headline and a
+ * verbose one about the same drain share every word the terse one has, and
+ * Jaccard would score that pairing low precisely when it matters most.
+ */
+export function sameEvent(a: string, b: string, threshold = 0.6): boolean {
+  const [ta, tb] = [significantTokens(a), significantTokens(b)];
+  if (ta.size === 0 || tb.size === 0) return false;
+  let shared = 0;
+  for (const w of ta) if (tb.has(w)) shared++;
+  return shared / Math.min(ta.size, tb.size) >= threshold;
 }
 
 export interface TriageVerdict {
@@ -149,11 +212,36 @@ export function triage(item: FeedItem, now: Date = new Date()): TriageVerdict {
     };
   }
 
-  const mapping = mapEventToAsset(text, 1);
+  // Judged on the title, like the framing gate above, and after it: a rally
+  // headline is a fact about direction, not about wording.
+  const rally = RALLY_TERMS.find((t) => mentions(title, t));
+  if (rally) {
+    return {
+      keep: false,
+      reason: `Headline reports a price rise ("${rally}"), which is not a threat to hedge.`,
+      matched,
+      asset: null,
+      mappingRule: "ABSTAIN",
+    };
+  }
+
+  // Mapped from the title, not the whole text.
+  //
+  // Measured, and the reason this is not the full text: "Tether Froze $42.4
+  // Million Three Months Before A Seizure Warrant" resolved to ETH because its
+  // summary described the USDT as sitting across "10 Ethereum addresses". The
+  // title alone maps to nothing, which is the honest answer. The story is a
+  // lawsuit about a stablecoin issuer, and hedging ETH over it would have been
+  // a trade placed on scenery.
+  //
+  // A headline is an editor's statement of what the story is about. An asset
+  // named only in the body is usually incidental, and the cost of that error
+  // is a real position in the wrong instrument.
+  const mapping = mapEventToAsset(title, 1);
   if (!mapping.asset) {
     return {
       keep: false,
-      reason: "Names no asset or ecosystem this system can hedge.",
+      reason: "Headline names no asset or ecosystem this system can hedge.",
       matched,
       asset: null,
       mappingRule: mapping.rule,
