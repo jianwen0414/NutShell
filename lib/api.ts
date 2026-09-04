@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import type { CorrelationId, ErrorCode, ErrorEnvelope } from "@/types";
 
@@ -54,7 +55,28 @@ export function errorJson(
   return json(body, correlationId, { status: STATUS[code] ?? 500 });
 }
 
+/**
+ * Constant-time string comparison.
+ *
+ * `===` on a secret leaks its prefix through timing. The tokens here guard a
+ * burner holding a few USDC, so this is not the difference between safe and
+ * unsafe — but the routes it protects can sign mainnet transactions, and a
+ * comparison that is correct by construction costs nothing.
+ */
+function secretsMatch(a: string, b: string): boolean {
+  const left = Buffer.from(a, "utf8");
+  const right = Buffer.from(b, "utf8");
+  // timingSafeEqual throws on a length mismatch, which would reintroduce the
+  // leak it exists to close. Compare a fixed-width digest instead.
+  const ha = createHash("sha256").update(left).digest();
+  const hb = createHash("sha256").update(right).digest();
+  return timingSafeEqual(ha, hb);
+}
+
 export function hasOperatorToken(request: Request) {
   const token = process.env.OPERATOR_TOKEN;
-  return Boolean(token && request.headers.get("authorization") === `Bearer ${token}`);
+  if (!token) return false;
+  const header = request.headers.get("authorization");
+  if (!header) return false;
+  return secretsMatch(header, `Bearer ${token}`);
 }

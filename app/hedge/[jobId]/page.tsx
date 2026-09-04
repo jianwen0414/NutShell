@@ -49,6 +49,7 @@ export default function ManualHedgePage({
   const [executedPosition, setExecutedPosition] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [customBudget, setCustomBudget] = useState<string>("50.00");
+  const [operatorToken, setOperatorToken] = useState<string>("");
 
   useEffect(() => {
     async function loadJob() {
@@ -80,7 +81,10 @@ export default function ManualHedgePage({
     try {
       const res = await fetch("/api/hedge/manual", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(operatorToken.trim() ? { authorization: `Bearer ${operatorToken.trim()}` } : {}),
+        },
         body: JSON.stringify({
           jobId,
           asset: job?.decision?.targetAsset || "ETH",
@@ -90,7 +94,7 @@ export default function ManualHedgePage({
 
       const data = await res.json();
       if (!res.ok || !data.ok) {
-        throw new Error(data.error || "Failed to execute manual hedge");
+        throw new Error(data?.error?.message || data?.error || "Failed to execute manual hedge");
       }
 
       setExecutedPosition(data.position);
@@ -200,6 +204,23 @@ export default function ManualHedgePage({
               </div>
               <span className="text-[10px] text-zinc-500 block">
                 Policy recommended: {job?.decision?.targetSizeUsdc || "50.00"} USDC
+              </span>
+            </div>
+
+            <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-3.5 space-y-1.5">
+              <label className="text-[11px] text-zinc-300 font-medium block">
+                Operator token
+              </label>
+              <input
+                type="password"
+                value={operatorToken}
+                onChange={(e) => setOperatorToken(e.target.value)}
+                disabled={Boolean(executedPosition)}
+                placeholder="OPERATOR_TOKEN"
+                className="bg-black/50 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm text-white font-mono w-full focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+              />
+              <span className="text-[10px] text-zinc-500 block">
+                Required — this route signs a transaction on Base mainnet.
               </span>
             </div>
           </div>
