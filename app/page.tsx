@@ -114,7 +114,7 @@ export default function LandingPage() {
 
       <main className="relative">
         {/* ── Hero ──────────────────────────────────────────────────────── */}
-        <section className="mx-auto flex min-h-[calc(100svh-57px)] max-w-6xl flex-col justify-center px-5 py-16 sm:px-8">
+        <section className="mx-auto flex min-h-[calc(100svh-57px)] max-w-6xl flex-col justify-center gap-10 px-5 pb-10 pt-14 sm:px-8">
           <div className="max-w-3xl space-y-6">
             <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-950/30 px-3 py-1 backdrop-blur-sm">
               <span className="relative flex h-1.5 w-1.5">
@@ -186,16 +186,14 @@ export default function LandingPage() {
             </div>
           </div>
 
-          <div className="mt-12">
-            <ProofStrip />
-          </div>
+          <ProofStrip />
         </section>
 
         {/* ── Verify ────────────────────────────────────────────────────── */}
         <section
           ref={verifyRef}
           id="verify"
-          className="mx-auto max-w-4xl scroll-mt-16 px-5 py-20 sm:px-8"
+          className="mx-auto max-w-4xl scroll-mt-16 px-5 pb-16 pt-4 sm:px-8"
         >
           <div className="mb-8 space-y-3 text-center">
             <div className="font-mono-code text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-400">
@@ -216,7 +214,7 @@ export default function LandingPage() {
         </section>
 
         {/* ── How ───────────────────────────────────────────────────────── */}
-        <section className="mx-auto max-w-6xl px-5 py-20 sm:px-8">
+        <section className="mx-auto max-w-6xl px-5 py-16 sm:px-8">
           <div className="mb-10 space-y-3">
             <div className="font-mono-code text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-400">
               Six stages, one correlation id

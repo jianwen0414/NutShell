@@ -98,7 +98,7 @@ export function ProofStrip() {
   const rejected = ingest?.rejected;
 
   return (
-    <div className="mx-auto w-full max-w-4xl overflow-hidden rounded-2xl border border-[#1e2433] bg-[#080c14]/80 backdrop-blur-xl">
+    <div className="w-full overflow-hidden rounded-2xl border border-[#1e2433] bg-[#080c14]/80 backdrop-blur-xl">
       <div className="flex flex-wrap divide-[#1e2433] sm:flex-nowrap">
         <Tile
           value={screened === undefined ? "—" : screened.toLocaleString()}

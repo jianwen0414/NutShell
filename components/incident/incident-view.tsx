@@ -38,7 +38,18 @@ export interface IncidentSeed {
   error: ErrorEnvelope | null;
 }
 
-const TERMINAL = new Set(["EXECUTED", "ATTESTED", "REJECTED", "FAILED", "OPEN", "EXPIRED", "UNWOUND", "HARVESTED"]);
+/**
+ * Statuses where the pipeline is genuinely still working, and so the only ones
+ * worth opening a stream for.
+ *
+ * Framed as an allowlist rather than a list of terminal states, because DECIDED
+ * is the trap: it is not terminal — an autonomous run moves on from it — but it
+ * is also where a run stops and waits under APPROVAL_REQUIRED, and where a
+ * worked record sits forever. Treating it as in-flight opened an EventSource
+ * against a job emitting nothing, which held the connection until the server's
+ * five-minute expiry and left the page loading the whole time.
+ */
+const IN_FLIGHT = new Set(["QUEUED", "VERIFYING", "VERIFIED", "SELECTING", "EXECUTING"]);
 
 function Section({
   step,
@@ -341,11 +352,11 @@ export function IncidentView({ seed }: { seed: IncidentSeed }) {
       idChainResolvable: seed.verification?.idChainResolvable ?? false,
       investigationSkipped: seed.investigationSkipped,
       error: seed.error?.error?.message ?? null,
-      finished: seed.status ? TERMINAL.has(seed.status) : false,
+      finished: seed.status ? !IN_FLIGHT.has(seed.status) : false,
     };
     setRun(seeded);
 
-    if (seed.found && seed.status && !TERMINAL.has(seed.status)) {
+    if (seed.found && seed.status && IN_FLIGHT.has(seed.status)) {
       attach(seed.id, seeded);
     }
   }, [seed, attach, setRun]);

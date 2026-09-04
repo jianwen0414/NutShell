@@ -34,3 +34,4 @@ npm-debug.log*
 
 # Local measurement, probe output, and the file-backed position store
 /artifacts/
+.shots/

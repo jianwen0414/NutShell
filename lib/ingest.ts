@@ -249,6 +249,26 @@ export function stopPolling(): boolean {
   return true;
 }
 
+/**
+ * Lay a worked history underneath whatever the poller finds.
+ *
+ * Takes items oldest-first and pushes them on in that order, so the newest
+ * ends up at the head exactly as a real poll would leave it. Their ids join
+ * `seen`, so a later poll returning the same story does not double up.
+ *
+ * Kept separate from `ingestItem` on purpose: this writes records that already
+ * carry their verdict and never starts a job, so it cannot spend inference.
+ */
+export function seedIngest(items: IngestedItem[]): void {
+  const s = state();
+  for (const item of items) {
+    if (s.seen.has(item.id)) continue;
+    s.seen.add(item.id);
+    s.history.unshift(item);
+  }
+  if (s.history.length > MAX_HISTORY) s.history.length = MAX_HISTORY;
+}
+
 export function ingestHistory(limit = 50): IngestedItem[] {
   return state().history.slice(0, limit);
 }

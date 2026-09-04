@@ -38,7 +38,6 @@ interface SceneRefs {
   stars: THREE.Points[];
   nebula: THREE.Mesh | null;
   ridges: THREE.Mesh[];
-  atmosphere: THREE.Mesh | null;
   frame: number | null;
   target: { x: number; y: number; z: number };
 }
@@ -59,7 +58,6 @@ export function HeroCanvas() {
     stars: [],
     nebula: null,
     ridges: [],
-    atmosphere: null,
     frame: null,
     target: { x: 0, y: 24, z: 300 },
   });
@@ -104,7 +102,7 @@ export function HeroCanvas() {
     r.renderer.setSize(window.innerWidth, window.innerHeight);
     r.renderer.setPixelRatio(Math.min(window.devicePixelRatio, compact ? 1.5 : 2));
     r.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    r.renderer.toneMappingExposure = 0.62;
+    r.renderer.toneMappingExposure = 0.5;
 
     r.composer = new EffectComposer(r.renderer);
     r.composer.addPass(new RenderPass(r.scene, r.camera));
@@ -112,9 +110,9 @@ export function HeroCanvas() {
       r.composer.addPass(
         new UnrealBloomPass(
           new THREE.Vector2(window.innerWidth, window.innerHeight),
-          0.7,
-          0.42,
-          0.86,
+          0.32,
+          0.6,
+          0.92,
         ),
       );
     }
@@ -142,7 +140,7 @@ export function HeroCanvas() {
         colors[i * 3 + 1] = color.g;
         colors[i * 3 + 2] = color.b;
 
-        sizes[i] = Math.random() * 2 + 0.4;
+        sizes[i] = Math.random() * 2.4 + 0.7;
       }
 
       geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -195,8 +193,8 @@ export function HeroCanvas() {
         uniforms: {
           time: { value: 0 },
           colorA: { value: new THREE.Color(0x065f46) },
-          colorB: { value: new THREE.Color(0x0e7490) },
-          opacity: { value: 0.26 },
+          colorB: { value: new THREE.Color(0x0c4a6e) },
+          opacity: { value: 0.30 },
         },
         vertexShader: `
           varying vec2 vUv;
@@ -285,36 +283,10 @@ export function HeroCanvas() {
       });
     }
 
-    // ── Atmosphere ──────────────────────────────────────────────────────────
-    {
-      const geometry = new THREE.SphereGeometry(600, 32, 32);
-      const material = new THREE.ShaderMaterial({
-        uniforms: { time: { value: 0 } },
-        vertexShader: `
-          varying vec3 vNormal;
-          void main() {
-            vNormal = normalize(normalMatrix * normal);
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
-        fragmentShader: `
-          varying vec3 vNormal;
-          uniform float time;
-          void main() {
-            float intensity = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
-            vec3 glow = vec3(0.06, 0.72, 0.51) * intensity;
-            float pulse = sin(time * 1.6) * 0.1 + 0.9;
-            gl_FragColor = vec4(glow * pulse, intensity * 0.22);
-          }
-        `,
-        side: THREE.BackSide,
-        blending: THREE.AdditiveBlending,
-        transparent: true,
-      });
-      const atmosphere = new THREE.Mesh(geometry, material);
-      r.scene.add(atmosphere);
-      r.atmosphere = atmosphere;
-    }
+    // The original also carried an atmosphere sphere. It is gone: the camera
+    // sits inside it, so its rim term painted a pale disc across the middle of
+    // the frame — directly behind the headline — and the nebula already
+    // supplies the edge glow it was there for.
 
     // ── Loop ────────────────────────────────────────────────────────────────
     let running = true;
@@ -332,10 +304,6 @@ export function HeroCanvas() {
       if (r.nebula) {
         const mat = r.nebula.material as THREE.ShaderMaterial;
         if (mat.uniforms?.time) mat.uniforms.time.value = time * 0.5;
-      }
-      if (r.atmosphere) {
-        const mat = r.atmosphere.material as THREE.ShaderMaterial;
-        if (mat.uniforms?.time) mat.uniforms.time.value = time;
       }
 
       if (r.camera) {
@@ -423,15 +391,12 @@ export function HeroCanvas() {
       }
       r.nebula?.geometry.dispose();
       if (r.nebula) (r.nebula.material as THREE.Material).dispose();
-      r.atmosphere?.geometry.dispose();
-      if (r.atmosphere) (r.atmosphere.material as THREE.Material).dispose();
       r.composer?.dispose();
       r.renderer?.dispose();
 
       r.stars = [];
       r.ridges = [];
       r.nebula = null;
-      r.atmosphere = null;
       r.composer = null;
       r.renderer = null;
       r.scene = null;
@@ -442,10 +407,17 @@ export function HeroCanvas() {
   return (
     <div className="pointer-events-none fixed inset-0 -z-10" aria-hidden="true">
       {/* Painted regardless, so the page has a ground even with no GPU. */}
-      <div className="absolute inset-0 bg-[radial-gradient(120%_80%_at_50%_-10%,#0b2b2a_0%,#07131c_38%,#05070b_72%,#05070b_100%)]" />
+      <div className="absolute inset-0 bg-[radial-gradient(120%_80%_at_50%_-10%,#072320_0%,#050f18_40%,#04060a_74%,#04060a_100%)]" />
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
-      {/* Keeps text legible over whichever of the two is showing. */}
-      <div className="absolute inset-0 bg-gradient-to-b from-transparent via-[#05070b]/35 to-[#05070b]" />
+      {/*
+        Two overlays, and both earn their place. The scrim holds body copy at
+        an accessible ratio over whatever the scene happens to be doing behind
+        it; the left-weighted wash darkens the column the text actually
+        occupies, so the hero can stay bright on the right where nothing is
+        being read.
+      */}
+      <div className="absolute inset-0 bg-gradient-to-b from-[#04060a]/35 via-transparent to-[#04060a]" />
+      <div className="absolute inset-0 bg-[linear-gradient(100deg,#04060a_0%,rgba(4,6,10,0.82)_38%,rgba(4,6,10,0.35)_62%,transparent_88%)]" />
     </div>
   );
 }

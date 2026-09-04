@@ -1,6 +1,7 @@
 import { json } from "@/lib/api";
 import { newCorrelationId } from "@/lib/ids";
 import { ingestHistory } from "@/lib/ingest";
+import { jobStore } from "@/lib/runtime";
 import type { AlertSourceType } from "@/types";
 
 /**
@@ -34,6 +35,38 @@ export async function GET(request: Request) {
     .filter((i) => (keptOnly ? i.verdict.keep : true))
     .slice(0, limit);
 
+  /**
+   * The outcome, for the items that produced one.
+   *
+   * Without this a consumer has to fetch every job separately to find out what
+   * a promoted headline actually scored, which is one request per row. The
+   * radar needs exactly that number to plot a point, so it is folded in here.
+   */
+  const store = jobStore();
+  const outcomes = new Map<
+    string,
+    { truthScore: number; agreement: number; tier: string; status: string } | null
+  >();
+  await Promise.all(
+    items
+      .filter((i) => i.jobId)
+      .map(async (i) => {
+        const job = await store.get(i.jobId!).catch(() => null);
+        const consensus = job?.verification?.consensus;
+        outcomes.set(
+          i.jobId!,
+          job && consensus
+            ? {
+                truthScore: consensus.truthScore,
+                agreement: consensus.agreement,
+                tier: job.decision?.tier ?? "PENDING",
+                status: job.status,
+              }
+            : null,
+        );
+      }),
+  );
+
   return json(
     items.map((i) => ({
       // Contract fields.
@@ -56,6 +89,9 @@ export async function GET(request: Request) {
       reason: i.verdict.reason,
       asset: i.verdict.asset,
       jobId: i.jobId ?? null,
+
+      // Null when the job produced no consensus, absent when there was no job.
+      outcome: i.jobId ? (outcomes.get(i.jobId) ?? null) : null,
     })),
     correlationId,
   );

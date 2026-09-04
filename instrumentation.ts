@@ -16,6 +16,22 @@ export async function register() {
   // module is loaded in both. Only the Node server should hold the loop.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
+  // A worked day of traffic, laid down before the poller starts so every
+  // surface has something on it from the first request. Real triage decides
+  // each item; nothing here fabricates a transaction. Off with DEMO_SEED=false.
+  if (process.env.DEMO_SEED !== "false") {
+    try {
+      const { seedDemoCorpus } = await import("./lib/demo-seed");
+      const { items, worked } = await seedDemoCorpus();
+      if (items > 0) {
+        console.info(`[seed] ${items} headlines laid down, ${worked} worked through to a decision.`);
+      }
+    } catch (e) {
+      // Seeding is a convenience. It must never stop the server booting.
+      console.error("[seed] could not seed the demo corpus:", e);
+    }
+  }
+
   if (process.env.INGEST_AUTOSTART !== "true") {
     console.info(
       "[ingest] autostart is off. Set INGEST_AUTOSTART=true, or POST /api/ingest to start it by hand.",
