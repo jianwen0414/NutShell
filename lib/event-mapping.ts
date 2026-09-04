@@ -51,6 +51,15 @@ const PROXY_ALIASES: Record<string, TradeableAsset> = {
   uniswap: 'ETH',
   aave: 'ETH',
   ronin: 'ETH',
+  // Base protocols that lib/entities.ts can already investigate. Without them
+  // stage 02 resolves a target, measures it, and then this abstains for want
+  // of an instrument, which reads as the system finding evidence and ignoring
+  // it. They settle on ETH for the same reason Aave and Uniswap do.
+  aerodrome: 'ETH',
+  morpho: 'ETH',
+  moonwell: 'ETH',
+  compound: 'ETH',
+  balancer: 'ETH',
 };
 
 /**
