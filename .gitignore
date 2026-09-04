@@ -36,5 +36,6 @@ npm-debug.log*
 /artifacts/
 .shots/
 
-# Presentation notes, kept out of the repo.
+# Presentation and working notes, kept out of the repo.
 docs/DEMO-FLOW.md
+docs/WORKLOG-FINAL-UX.md
