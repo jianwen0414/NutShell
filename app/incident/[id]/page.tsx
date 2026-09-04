@@ -2,6 +2,7 @@ import { Navigation } from "@/components/navigation";
 import { IncidentView, type IncidentSeed } from "@/components/incident/incident-view";
 import { loadRecord } from "@/lib/positions";
 import { jobStore } from "@/lib/runtime";
+import { loadJobFromDb } from "@/lib/postgres";
 import { toJsonSafe } from "@/lib/errors";
 
 /**
@@ -32,9 +33,14 @@ export default async function IncidentPage({
 }) {
   const { id } = await params;
 
-  const job = await jobStore()
-    .get(id)
-    .catch(() => null);
+  // The in-memory store first, because a running job is only there. Then the
+  // archive, which is the only thing that survives a restart — without this
+  // fallback an incident from an earlier process rendered with its verdicts
+  // and consensus blank while the rows sat intact in Supabase.
+  const job =
+    (await jobStore()
+      .get(id)
+      .catch(() => null)) ?? (await loadJobFromDb(id).catch(() => null));
 
   // Malformed ids throw rather than returning null, since the store builds a
   // filesystem path from them.
@@ -50,15 +56,19 @@ export default async function IncidentPage({
     found: Boolean(job || record),
     status: job?.status ?? (record ? record.position.status : null),
     alert: job?.alert ?? null,
-    evidence: job?.evidence ?? null,
-    investigationSkipped: job?.investigationSkipped === true,
+    evidence: (job as { evidence?: unknown } | null)?.evidence ?? null,
+    investigationSkipped: (job as { investigationSkipped?: boolean } | null)?.investigationSkipped === true,
+    // Stage 02 is not persisted by any table, so a record rebuilt from the
+    // archive genuinely has no evidence rather than having found none.
+    evidenceUnavailable: (job as { evidenceUnavailable?: boolean } | null)?.evidenceUnavailable === true,
+    restoredFromDb: (job as { restoredFromDb?: boolean } | null)?.restoredFromDb === true,
     verification: job?.verification ?? null,
     decision: job?.decision ?? null,
     // The disk record wins for the position: it is what was actually written
     // after the fill settled, and it survives a restart.
     position: record?.position ?? job?.position ?? null,
     attestation: record?.attestation ?? job?.attestation ?? null,
-    error: job?.error ?? null,
+    error: (job as { error?: unknown } | null)?.error ?? null,
   });
 
   return (

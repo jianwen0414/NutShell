@@ -13,6 +13,16 @@
 
 import { Pool, PoolConfig } from "pg";
 import type { Job } from "@/worker/pipeline";
+import type {
+  Attestation,
+  ConsensusMetrics,
+  HedgeDecision,
+  HedgePosition,
+  JobStatus,
+  ModelVerdict,
+  VerificationResult,
+} from "@/types";
+import { basescanTxUrl } from "./config";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -229,5 +239,223 @@ export async function persistJobToDb(job: Job): Promise<boolean> {
     return false;
   } finally {
     client.release();
+  }
+}
+
+// ── Reading it back ────────────────────────────────────────────────────────
+
+/**
+ * Everything written above, in the shape the UI already renders.
+ *
+ * The archive was write-only: six INSERTs, no SELECT anywhere. So a job that
+ * had scrolled out of the in-memory store — or that predated a server restart —
+ * rendered with its verdicts and consensus blank on `/incident/[id]`, while
+ * the rows sat intact in Supabase. This is the read path that closes that.
+ *
+ * 🔒 One honest gap, and it is structural rather than an oversight here: there
+ * is no evidence table. Stage 02's packet is never persisted by
+ * `persistJobToDb`, so a job restored from the database carries no on-chain
+ * checks and the incident page says the stage was not recorded rather than
+ * implying it found nothing. Those are different claims and the UI must not
+ * conflate them.
+ */
+export interface RestoredJob {
+  jobId: string;
+  status: JobStatus;
+  alert: {
+    id: string;
+    source: unknown;
+    rawText: string;
+    sourceUrl?: string;
+    clusterKey: string;
+    receivedAt: string;
+    metadata?: Record<string, string>;
+  };
+  verification?: VerificationResult;
+  decision?: HedgeDecision;
+  position?: HedgePosition;
+  attestation?: Attestation;
+  /** Always true. Lets a caller label the record as reconstructed. */
+  restoredFromDb: true;
+  /** Stage 02 is not persisted by any schema, so it can never be restored. */
+  evidenceUnavailable: true;
+}
+
+/** `jsonb` arrives parsed on some drivers and as text on others. */
+function asJson<T>(value: unknown, fallback: T): T {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return fallback;
+    }
+  }
+  return value as T;
+}
+
+/** `numeric` comes back as a string from pg; every score here is a number. */
+const num = (v: unknown, fallback = 0): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+/** numeric(x,6) reads back as "0.000000"; trim to how the app writes money. */
+function trimDecimal(v: unknown): string {
+  const raw = String(v ?? "0");
+  if (!raw.includes(".")) return raw;
+  const trimmed = raw.replace(/0+$/, "").replace(/.$/, "");
+  return trimmed === "" || trimmed === "-" ? "0" : trimmed;
+}
+
+const iso = (v: unknown): string =>
+  v instanceof Date ? v.toISOString() : typeof v === "string" ? v : new Date(0).toISOString();
+
+/**
+ * Reconstruct one job from the archive.
+ *
+ * Returns null when there is no database configured or no alert row, so a
+ * caller can fall through to whatever it would otherwise have shown. Never
+ * throws: a page that renders from memory must not fail because Supabase is
+ * unreachable.
+ */
+export async function loadJobFromDb(jobId: string): Promise<RestoredJob | null> {
+  const pool = getDbPool();
+  if (!pool) return null;
+
+  try {
+    // 🔒 pool.query, not a checked-out client. A pg Client executes one query
+    // at a time — issuing six concurrently on a single client is deprecated in
+    // pg 8 and removed in 9, and the responses can interleave. The pool hands
+    // each query its own client, which is what makes Promise.all correct here.
+    // There is no transaction to hold, so nothing is lost by not checking one
+    // out; these are six independent reads of an append-only archive.
+    const [alerts, vers, verdicts, decisions, positions, attestations] = await Promise.all([
+      pool.query(`SELECT * FROM alerts WHERE id = $1 LIMIT 1`, [jobId]),
+      pool.query(`SELECT * FROM verifications WHERE correlation_id = $1 LIMIT 1`, [jobId]),
+      pool.query(
+        `SELECT * FROM model_verdicts WHERE correlation_id = $1 ORDER BY claim_score DESC`,
+        [jobId],
+      ),
+      pool.query(`SELECT * FROM decisions WHERE correlation_id = $1 LIMIT 1`, [jobId]),
+      pool.query(`SELECT * FROM positions WHERE correlation_id = $1 LIMIT 1`, [jobId]),
+      pool.query(`SELECT * FROM attestations WHERE correlation_id = $1 LIMIT 1`, [jobId]),
+    ]);
+
+    const a = alerts.rows[0];
+    if (!a) return null;
+
+    const restored: RestoredJob = {
+      jobId,
+      status: (a.status as JobStatus) ?? "VERIFIED",
+      alert: {
+        id: jobId,
+        // Written as either a bare string or the structured source object,
+        // depending on which path raised the alert. Both are handed back as
+        // they were stored; the UI already accepts either.
+        source: asJson<unknown>(a.source, a.source),
+        rawText: a.raw_text ?? "",
+        ...(a.source_url ? { sourceUrl: a.source_url as string } : {}),
+        clusterKey: a.cluster_key ?? "",
+        receivedAt: iso(a.received_at),
+        metadata: asJson<Record<string, string>>(a.metadata, {}),
+      },
+      restoredFromDb: true,
+      evidenceUnavailable: true,
+    };
+
+    const v = vers.rows[0];
+    if (v) {
+      const consensus: ConsensusMetrics = {
+        truthScore: num(v.truth_score),
+        severity: (num(v.severity, 3) || 3) as ConsensusMetrics["severity"],
+        agreement: num(v.agreement),
+        spread: num(v.spread),
+        concordance: num(v.concordance),
+        conviction: num(v.conviction),
+        debateTriggered: Boolean(v.debate_triggered),
+        modelsResponded: num(v.models_responded),
+      };
+
+      const models: ModelVerdict[] = verdicts.rows.map((r) => ({
+        modelId: r.model_id,
+        role: r.role,
+        claimScore: num(r.claim_score),
+        severity: (num(r.severity, 3) || 3) as ModelVerdict["severity"],
+        stance: r.stance,
+        keyEvidence: asJson<string[]>(r.key_evidence, []),
+        redFlags: asJson<string[]>(r.red_flags, []),
+        gonkaRequestId: r.gonka_request_id ?? "",
+        responseHash: r.response_hash ?? "",
+        latencyMs: num(r.latency_ms),
+        parseRepaired: Boolean(r.parse_repaired),
+      }));
+
+      restored.verification = {
+        correlationId: jobId,
+        alertId: jobId,
+        verdicts: models,
+        consensus,
+        reasoningTrace: asJson<string[]>(v.reasoning_trace, []),
+        gonkaRequestIds: asJson<string[]>(v.gonka_request_ids, []),
+        idChainResolvable: Boolean(v.id_chain_resolvable),
+        verifiedAt: iso(v.verified_at),
+        totalLatencyMs: num(v.total_latency_ms),
+      };
+    }
+
+    const d = decisions.rows[0];
+    if (d) {
+      restored.decision = {
+        correlationId: jobId,
+        tier: d.tier,
+        reason: d.reason ?? "",
+        targetAsset: d.target_asset ?? "",
+        mappingRule: d.mapping_rule,
+        // numeric(x,6) reads back as "0.000000"; every other money string in
+        // the app is trimmed, so match them rather than leaking the column type.
+        targetSizeUsdc: trimDecimal(d.target_size_usdc),
+        bindingCap: d.binding_cap,
+        decidedAt: iso(d.decided_at),
+      };
+    }
+
+    const p = positions.rows[0];
+    if (p) {
+      restored.position = {
+        correlationId: jobId,
+        status: p.status,
+        asset: p.asset,
+        strike: String(p.strike),
+        expiry: iso(p.expiry),
+        contracts: String(p.contracts),
+        premiumPaidUsdc: String(p.premium_paid_usdc),
+        notionalProtectedUsdc: String(p.notional_protected_usdc),
+        entryTxHash: p.entry_tx_hash,
+        // Not a stored column — derived from the hash, so the link is right
+        // whichever explorer the config points at.
+        baseScanUrl: p.entry_tx_hash ? basescanTxUrl(p.entry_tx_hash) : "",
+        spotAtEntry: String(p.spot_at_entry ?? "0"),
+        deltaAtEntry: num(p.delta_at_entry),
+        openedAt: iso(p.opened_at),
+        wasDryRun: Boolean(p.was_dry_run),
+      } as HedgePosition;
+    }
+
+    const at = attestations.rows[0];
+    if (at) {
+      restored.attestation = {
+        correlationId: jobId,
+        method: at.method,
+        ...(at.tx_hash ? { txHash: at.tx_hash, baseScanUrl: basescanTxUrl(at.tx_hash) } : {}),
+        payload: asJson(at.payload, {}),
+        createdAt: iso(at.created_at ?? a.received_at),
+      } as Attestation;
+    }
+
+    return restored;
+  } catch (e) {
+    console.error(`[postgres] could not restore job ${jobId}:`, e);
+    return null;
   }
 }

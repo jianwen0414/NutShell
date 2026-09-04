@@ -31,6 +31,10 @@ export interface IncidentSeed {
   alert: AlertEvent | null;
   evidence: EvidencePacket | null;
   investigationSkipped: boolean;
+  /** Rebuilt from the archive rather than held in memory. */
+  restoredFromDb?: boolean;
+  /** Stage 02 is not persisted by any table, so it cannot be restored. */
+  evidenceUnavailable?: boolean;
   verification: VerificationResult | null;
   decision: HedgeDecision | null;
   position: HedgePosition | null;
@@ -426,6 +430,14 @@ export function IncidentView({ seed }: { seed: IncidentSeed }) {
               {run.status}
             </span>
           )}
+          {seed.restoredFromDb && (
+            <span
+              className="rounded border border-cyan-500/40 bg-cyan-950/40 px-2 py-0.5 font-mono-code text-[10px] font-bold text-cyan-300"
+              title="Rebuilt from the Postgres archive rather than held in memory."
+            >
+              FROM ARCHIVE
+            </span>
+          )}
         </div>
         <h1 className="font-mono-code text-2xl font-black tracking-tight text-white sm:text-3xl">
           {headline}
@@ -487,11 +499,32 @@ export function IncidentView({ seed }: { seed: IncidentSeed }) {
           title="What the chain said"
           subtitle="Measured before any model was asked, so the claim is scored against evidence rather than its own wording."
         >
-          <EvidencePanel
-            evidence={run.evidence}
-            checks={run.checks}
-            skipped={run.investigationSkipped}
-          />
+          {/*
+            "Not stored" and "found nothing" are different claims and must not
+            look the same. No table holds the evidence packet, so a record
+            rebuilt from the archive has none to show — and says so rather than
+            rendering an empty result that reads as a clean chain.
+          */}
+          {seed.evidenceUnavailable && !run.evidence && run.checks.length === 0 ? (
+            <div className="rounded-2xl border border-[#1e2433] bg-[#0a0f18] p-5">
+              <div className="font-mono-code text-xs font-bold text-zinc-300">
+                Not recorded for this incident
+              </div>
+              <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+                This record was rebuilt from the archive, and the on-chain evidence
+                packet is not one of the things the schema stores. The stage ran — the
+                verdicts below were scored against it — but the individual checks live
+                only in the process that performed them. This is missing data, not a
+                clean chain.
+              </p>
+            </div>
+          ) : (
+            <EvidencePanel
+              evidence={run.evidence}
+              checks={run.checks}
+              skipped={run.investigationSkipped}
+            />
+          )}
         </Section>
 
         <Section
