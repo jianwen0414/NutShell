@@ -128,7 +128,7 @@ async function main() {
       targetAsset: "ETH",
       mappingRule: "DIRECT" as const,
       targetSizeUsdc: "50.00",
-      bindingCap: "DAILY_LIMIT" as const,
+      bindingCap: "DAILY" as const,
       decidedAt: new Date().toISOString(),
     },
   };

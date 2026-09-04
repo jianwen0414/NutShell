@@ -1,11 +1,16 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import Link from "next/link";
 import type { ConsensusMetrics, HedgeDecision, ModelVerdict } from "@/types";
 
 /** What a real run fills in. Empty until the pipeline reports something. */
 interface LiveRun {
   jobId: string | null;
+  /** True when this run deliberately skipped stage 02. */
+  investigationSkipped: boolean;
+  /** Operator-injected runs are eligible to reach the book if policy allows. */
+  tradeEligible: boolean;
   verdicts: ModelVerdict[];
   consensus: ConsensusMetrics | null;
   decision: HedgeDecision | null;
@@ -14,6 +19,8 @@ interface LiveRun {
 
 const EMPTY_RUN: LiveRun = {
   jobId: null,
+  investigationSkipped: false,
+  tradeEligible: false,
   verdicts: [],
   consensus: null,
   decision: null,
@@ -186,13 +193,11 @@ export function DashboardHero() {
   // Counters come from the job store. They are real but reset with the server,
   // since there is no database yet.
   const [stats, setStats] = useState<{ processed: number; rejected: number } | null>(null);
-  // When the last verification finished. Null until one has.
   const [lastRunAt, setLastRunAt] = useState<number | null>(null);
   const [sinceLastRun, setSinceLastRun] = useState<number>(0);
 
-  // Real pipeline output. The stage animation below is unchanged; it is now
-  // driven by these events arriving instead of by a chain of timers.
   const [live, setLive] = useState<LiveRun>(EMPTY_RUN);
+  const [operatorToken, setOperatorToken] = useState<string>("");
   const [agentStatus, setAgentStatus] = useState<"ARMED" | "PAUSED">("ARMED");
   const [execMode, setExecMode] = useState<"AUTONOMOUS" | "APPROVAL_REQUIRED" | "MONITOR_ONLY">("AUTONOMOUS");
   const sourceRef = useRef<EventSource | null>(null);
@@ -212,37 +217,57 @@ export function DashboardHero() {
   }, [lastRunAt]);
 
   useEffect(() => {
-    const pull = () => {
-      fetch("/api/stats")
-        .then((r) => r.json())
-        .then((d) => setStats({ processed: d.processed ?? 0, rejected: d.rejected ?? 0 }))
-        .catch(() => {});
-      fetch("/api/control/status")
-        .then((r) => r.json())
-        .then((d) => {
-          if (d?.status) setAgentStatus(d.status);
-          if (d?.mode) setExecMode(d.mode);
-          if (d?.status === "PAUSED") {
-            if (isRunning) {
-              sourceRef.current?.close();
-              if (timerRef.current) clearTimeout(timerRef.current);
-              setCurrentStep("IDLE");
-              setDetectSearching(false);
-              setLive(EMPTY_RUN);
-              if (typeof window !== "undefined") {
-                sessionStorage.removeItem("nutshell_active_job");
+    let cancelled = false;
+    async function pull() {
+      try {
+        const res = await fetch("/api/control/status");
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled) {
+            const currentStat = data.status || data.agentStatus;
+            const currentM = data.mode || data.executionMode;
+            if (currentStat) {
+              setAgentStatus(currentStat);
+              if (currentStat === "PAUSED") {
+                if (sourceRef.current) {
+                  sourceRef.current.close();
+                  sourceRef.current = null;
+                }
+                if (timerRef.current) clearTimeout(timerRef.current);
+                setCurrentStep("IDLE");
+                setDetectSearching(false);
+                setLive(EMPTY_RUN);
+                if (typeof window !== "undefined") {
+                  sessionStorage.removeItem("nutshell_active_job");
+                }
               }
             }
+            if (currentM) setExecMode(currentM);
           }
-        })
-        .catch(() => {});
-    };
-    pull();
-    const interval = setInterval(pull, 3000);
-    return () => clearInterval(interval);
-  }, [isRunning]);
+        }
 
-  // During active simulation, auto-open currently active stage and smooth scroll down
+        const statsRes = await fetch("/api/stats");
+        if (statsRes.ok) {
+          const statsData = await statsRes.json();
+          if (!cancelled && statsData) {
+            setStats({
+              processed: statsData.processed ?? 0,
+              rejected: statsData.rejected ?? 0,
+            });
+          }
+        }
+      } catch {
+        // Server not ready yet — keep defaults
+      }
+    }
+    pull();
+    const interval = setInterval(pull, 1500);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   useEffect(() => {
     if (isRunning) {
       setOpenStages((prev) => ({
@@ -250,7 +275,6 @@ export function DashboardHero() {
         [currentStep]: true,
       }));
 
-      // Smoothly scroll down to keep the active stage in view
       const timer = setTimeout(() => {
         const stageEl = document.getElementById(`stage-${currentStep}`);
         if (stageEl) {
@@ -271,16 +295,7 @@ export function DashboardHero() {
     }));
   }
 
-  /**
-   * Runs the real pipeline and drives this animation from what comes back.
-   *
-   * The stage sequence, the scroll and every visual below are unchanged. What
-   * changed is the driver: instead of a chain of timers inventing progress,
-   * each step advances when the corresponding event arrives from the server.
-   * Model cards fill in as each model actually answers, so a slow model looks
-   * slow and a dropped one is visibly missing.
-   */
-  async function startLiveExecution() {
+  async function startLiveExecution(mode: "full" | "bypass" = "full") {
     if (agentStatus === "PAUSED") {
       setLive({
         ...EMPTY_RUN,
@@ -292,6 +307,19 @@ export function DashboardHero() {
     if (timerRef.current) clearTimeout(timerRef.current);
     sourceRef.current?.close();
 
+    const hasToken = operatorToken.trim().length > 0;
+    const bypass = mode === "bypass";
+
+    if (bypass && !hasToken) {
+      setLive({
+        ...EMPTY_RUN,
+        error: "Operator token required — bypassing stage 02 is an operator action.",
+      });
+      return;
+    }
+
+    const authed = hasToken;
+
     setCurrentStep("01_DETECT");
     setSelectedNode("node-live");
     setOpenStages({ "01_DETECT": true });
@@ -302,16 +330,27 @@ export function DashboardHero() {
     setChallengePhase("DISAGREEMENT");
     setScoreProgress(0);
     setProtectPhase("LOCATING");
-    setLive(EMPTY_RUN);
+    setLive({ ...EMPTY_RUN, investigationSkipped: bypass, tradeEligible: authed });
 
     const text = DEFAULT_CLAIM;
 
     let jobId: string;
     try {
-      const res = await fetch("/api/verify", {
+      const res = await fetch(authed ? "/api/simulate/inject" : "/api/verify", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text }),
+        headers: {
+          "content-type": "application/json",
+          ...(authed ? { authorization: `Bearer ${operatorToken.trim()}` } : {}),
+        },
+        body: JSON.stringify(
+          authed
+            ? {
+                scenarioId: "scen_bridge_exploit",
+                skipInvestigation: bypass,
+                dryRun: true,
+              }
+            : { text },
+        ),
       });
       const body = await res.json();
       if (!res.ok || !body?.jobId) {
@@ -323,6 +362,16 @@ export function DashboardHero() {
       setCurrentStep("IDLE");
       return;
     }
+
+    setLive({
+      ...EMPTY_RUN,
+      jobId,
+      investigationSkipped: bypass,
+      tradeEligible: authed,
+    });
+    setDetectSearching(false);
+    setStep01Done(true);
+    setCurrentStep("02_INVESTIGATE");
 
     attachJobStream(jobId);
   }
@@ -337,16 +386,9 @@ export function DashboardHero() {
       sessionStorage.setItem("nutshell_active_job", jobId);
     }
 
-    setLive((prev) => ({ ...prev, jobId }));
-    setDetectSearching(false);
-    setStep01Done(true);
-    setInvestigateSubstep(4);
-
     const es = new EventSource(`/api/verify/${jobId}/stream`);
     sourceRef.current = es;
 
-    // Which card a model lands in. Three slots, first come first served, so
-    // the layout holds whichever models actually answer.
     const slots: Array<"mm" | "km" | "glm"> = ["mm", "km", "glm"];
     const assigned = new Map<string, "mm" | "km" | "glm">();
 
@@ -355,6 +397,10 @@ export function DashboardHero() {
       if (d.step === "investigating") {
         setCurrentStep("02_INVESTIGATE");
         setInvestigateSubstep(4);
+      }
+      if (d.step === "investigation-skipped") {
+        setCurrentStep("02_INVESTIGATE");
+        setLive((prev) => ({ ...prev, investigationSkipped: true }));
       }
       if (d.step === "layer1") {
         setCurrentStep("03_ANALYZE");
@@ -432,8 +478,25 @@ export function DashboardHero() {
 
   // Check and restore active job when switching between tabs or pages
   useEffect(() => {
-    function checkAndRestore() {
+    async function checkAndRestore() {
       if (typeof window === "undefined") return;
+
+      try {
+        const statusRes = await fetch("/api/control/status");
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData?.status === "PAUSED") {
+            sessionStorage.removeItem("nutshell_active_job");
+            setCurrentStep("IDLE");
+            setLive(EMPTY_RUN);
+            setAgentStatus("PAUSED");
+            return;
+          }
+        }
+      } catch {
+        // ignore
+      }
+
       const storedJobId = sessionStorage.getItem("nutshell_active_job");
       if (!storedJobId) return;
 
@@ -456,6 +519,7 @@ export function DashboardHero() {
             if (data.verification?.consensus) {
               setLive((prev) => ({
                 ...prev,
+                investigationSkipped: data.investigationSkipped === true,
                 consensus: data.verification.consensus,
                 decision: data.decision,
                 verdicts: data.verification.models ?? [],
@@ -603,24 +667,71 @@ export function DashboardHero() {
             </div>
           </div>
 
-          {/* Single Scenario Trigger Button */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => startLiveExecution()}
-              disabled={isRunning || agentStatus === "PAUSED"}
-              className={`rounded-xl px-5 py-2.5 text-xs font-black transition-all shadow-md ${
-                agentStatus === "PAUSED"
-                  ? "bg-zinc-800 text-zinc-400 border border-zinc-700 cursor-not-allowed opacity-75"
-                  : "bg-gradient-to-r from-red-500 via-amber-500 to-emerald-400 text-zinc-950 hover:opacity-90 active:scale-95 disabled:opacity-50 shadow-[0_0_20px_rgba(239,68,68,0.3)] cursor-pointer"
-              }`}
-              title={agentStatus === "PAUSED" ? "Agent is paused. Resume in Control Center to inject." : undefined}
-            >
-              {agentStatus === "PAUSED"
-                ? "⏸ DETECTION PAUSED (RESUME IN CONTROL)"
-                : isRunning
-                  ? "⚡ AUTONOMOUS RESOLUTION IN FLIGHT..."
-                  : "🧪 INJECT BRIDGE EXPLOIT SCENARIO"}
-            </button>
+          {/* Action Trigger Buttons & Operator Token */}
+          <div className="flex flex-col items-stretch sm:items-end gap-2">
+            <div className="flex flex-wrap items-center gap-2 justify-end">
+              <button
+                onClick={() => startLiveExecution("full")}
+                disabled={isRunning || agentStatus === "PAUSED"}
+                className={`rounded-xl px-5 py-2.5 text-xs font-black transition-all shadow-md ${
+                  agentStatus === "PAUSED"
+                    ? "bg-zinc-800 text-zinc-400 border border-zinc-700 cursor-not-allowed opacity-75"
+                    : "bg-gradient-to-r from-red-500 via-amber-500 to-emerald-400 text-zinc-950 hover:opacity-90 active:scale-95 disabled:opacity-50 shadow-[0_0_20px_rgba(239,68,68,0.3)] cursor-pointer"
+                }`}
+                title={
+                  agentStatus === "PAUSED"
+                    ? "Agent is paused. Resume in Control Center to inject."
+                    : operatorToken.trim()
+                      ? "Stage 02 measures Base mainnet, then the models score the claim against it. Operator-injected, so this can reach the book if the evidence supports the claim."
+                      : "Stage 02 measures Base mainnet, then the models score the claim against it. No token, so this runs as public verification and cannot trade (PRD §9.3). Add a token to make it trade eligible."
+                }
+              >
+                {agentStatus === "PAUSED"
+                  ? "⏸ DETECTION PAUSED"
+                  : isRunning
+                    ? "⚡ RESOLUTION IN FLIGHT..."
+                    : "🧪 INJECT — FULL PIPELINE"}
+              </button>
+
+              <button
+                onClick={() => startLiveExecution("bypass")}
+                disabled={isRunning || agentStatus === "PAUSED"}
+                className={`rounded-xl border border-amber-500/60 bg-amber-950/50 px-5 py-2.5 text-xs font-black text-amber-200 hover:bg-amber-900/50 active:scale-95 disabled:opacity-50 transition-all ${
+                  agentStatus === "PAUSED" ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                }`}
+                title="Operator injection with stage 02 skipped. The models score the claim on its text alone, as they did before the investigation stage existed."
+              >
+                ⏭️ INJECT — BYPASS STAGE 02
+              </button>
+
+              <input
+                type="password"
+                value={operatorToken}
+                onChange={(e) => setOperatorToken(e.target.value)}
+                placeholder="OPERATOR_TOKEN"
+                className="rounded-lg bg-[#0a0d14] border border-zinc-700 px-3 py-2 text-[11px] font-mono-code text-zinc-200 placeholder:text-zinc-600 focus:border-amber-500/60 focus:outline-none w-40"
+                title="Required for the bypass path. Compared against OPERATOR_TOKEN server-side; never stored."
+              />
+            </div>
+
+            <div className="text-[10px] text-zinc-500 font-sans text-right max-w-md leading-relaxed">
+              <strong className="text-zinc-400">Full pipeline</strong> measures Base mainnet first, then scores the claim against it.{" "}
+              <strong className="text-amber-400/90">Bypass</strong> skips that and scores the wording alone.
+              {operatorToken.trim() ? (
+                <>
+                  {" "}
+                  Token present — both are operator-injected and{" "}
+                  <span className="text-emerald-400">trade-eligible</span>.
+                </>
+              ) : (
+                <>
+                  {" "}
+                  No token — full pipeline is{" "}
+                  <span className="text-zinc-400">public-verify only</span>, bypass requires a token to inject.
+                </>
+              )}
+            </div>
+
             {live.error && (
               <span className="text-[11px] text-red-300 font-mono-code">{live.error}</span>
             )}
@@ -844,6 +955,31 @@ export function DashboardHero() {
               })()}
             </div>
           )}
+
+          {/* Live Node Selected — Standby Card when Agent is Paused */}
+          {selectedNode === "node-live" && agentStatus === "PAUSED" && (
+            <div className="rounded-xl bg-[#130b05] p-4 border border-amber-500/40 font-mono-code text-xs space-y-2 animate-fadeIn">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2.5 w-2.5 rounded-full bg-amber-400"></span>
+                    <span className="text-sm font-bold text-amber-200">Autonomous Sentinel Standby (Agent Paused)</span>
+                    <span className="bg-amber-950 text-amber-300 text-[10px] px-2 py-0.5 rounded font-bold border border-amber-500/30">IDLE</span>
+                  </div>
+                  <div className="text-xs text-zinc-300 font-sans">
+                    Automated exploit ingestion, on-chain Base RPC probes, and execution orders are temporarily paused by the operator.
+                  </div>
+                </div>
+                <Link
+                  href="/control"
+                  className="rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 px-3.5 py-1.5 text-xs text-amber-200 font-bold whitespace-nowrap transition-colors flex items-center gap-1.5"
+                >
+                  <span>Resume in Control Center</span>
+                  <span>→</span>
+                </Link>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -968,7 +1104,9 @@ export function DashboardHero() {
                       </span>
                       <span className="text-zinc-600 hidden md:inline">•</span>
                       <span className="text-xs sm:text-sm text-zinc-200 font-sans font-medium truncate max-w-lg">
-                        {stage.id === "06_PROTECT" && execMode === "MONITOR_ONLY"
+                        {stage.id === "02_INVESTIGATE" && live.investigationSkipped
+                          ? "⏭️ Stage 02 bypassed — models scored claim wording alone (Operator injection)"
+                          : stage.id === "06_PROTECT" && execMode === "MONITOR_ONLY"
                           ? live.consensus
                             ? live.consensus.truthScore >= 40
                               ? `👁 Trade suppressed (Monitor Only) • Telegram alert dispatched (Score ${live.consensus.truthScore} ≥ 40)`
@@ -1113,7 +1251,31 @@ export function DashboardHero() {
                       )}
 
                       {/* ================= STAGE 02 DETAILS ================= */}
-                      {stage.id === "02_INVESTIGATE" && (
+                      {stage.id === "02_INVESTIGATE" && live.investigationSkipped && (
+                        <div className="space-y-3 pt-4 font-mono-code">
+                          <div className="rounded-xl bg-amber-950/40 p-4 border border-amber-500/50 space-y-2">
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                              <span className="text-sm font-bold text-amber-200 flex items-center gap-2">
+                                <span>⏭️</span> STAGE 02 BYPASSED
+                              </span>
+                              <span className="text-[11px] font-bold text-amber-300 bg-amber-950 px-2 py-0.5 rounded border border-amber-500/40">
+                                OPERATOR INJECTION
+                              </span>
+                            </div>
+                            <div className="text-xs text-zinc-200 font-sans leading-relaxed">
+                              No on-chain evidence was gathered for this run. The three models score the claim on
+                              its wording alone — the behaviour before the investigation stage existed.
+                            </div>
+                            <div className="text-[11px] text-amber-300/80 font-sans leading-relaxed border-t border-amber-900/50 pt-2">
+                              Nothing here is a statement about Base mainnet. The chain was not queried, so this
+                              run carries no corroboration and no contradiction either way. Use the full-pipeline
+                              button to see what the chain actually says about this claim.
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {stage.id === "02_INVESTIGATE" && !live.investigationSkipped && (
                         <div className="space-y-3 pt-4 font-mono-code">
                           {/* Agent Reasoning Notice */}
                           <div className="rounded-xl bg-[#09121d] p-3.5 border border-cyan-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
