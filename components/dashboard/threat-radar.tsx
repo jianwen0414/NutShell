@@ -75,6 +75,44 @@ export function ThreatRadar({
   const liveScore = live.consensus?.truthScore ?? BASELINE;
   const active = plotted.find((e) => e.id === selected) ?? null;
 
+  /**
+   * The path through the plotted scores, including the live point on the end.
+   *
+   * The dots are laid out by flexbox, so the geometry is mirrored here rather
+   * than shared: `justify-between` with padding puts point i at
+   * 5% + i * (90% / (n-1)) across, and a score sits `score * 1.55px` above a
+   * baseline 20px off the floor of a 224px box. Expressed against a 1000x200
+   * viewBox that is the same arithmetic in different units.
+   */
+  const curve = useMemo(() => {
+    const scores = [...plotted.map(scoreOf), liveScore];
+    if (scores.length < 2) return null;
+
+    const H = 200;
+    const points = scores.map((s, i) => ({
+      x: 50 + (i * 900) / (scores.length - 1),
+      // 224px tall box, 16px bottom padding, points rise at 1.55px per point.
+      y: Math.max(6, H - 18 - (s * 1.55 * H) / 224),
+    }));
+
+    // Midpoint smoothing: each segment curves through the average of its
+    // endpoints, which rounds the joins without letting the line rise above
+    // the highest point it connects.
+    let d = `M ${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`;
+    for (let i = 1; i < points.length; i++) {
+      const prev = points[i - 1];
+      const cur = points[i];
+      const mx = (prev.x + cur.x) / 2;
+      d += ` Q ${prev.x.toFixed(1)},${prev.y.toFixed(1)} ${mx.toFixed(1)},${((prev.y + cur.y) / 2).toFixed(1)}`;
+      d += ` Q ${cur.x.toFixed(1)},${cur.y.toFixed(1)} ${cur.x.toFixed(1)},${cur.y.toFixed(1)}`;
+    }
+
+    const endTone =
+      liveScore >= 70 ? "#ef4444" : liveScore >= 40 ? "#f59e0b" : "#10b981";
+
+    return { d, endTone };
+  }, [plotted, liveScore]);
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col justify-between gap-2 border-b border-zinc-800/80 pb-3 sm:flex-row sm:items-center">
@@ -155,6 +193,47 @@ export function ThreatRadar({
             <div key={i} className="border-b border-r border-cyan-500" />
           ))}
         </div>
+
+        {/*
+          The curve through the points.
+
+          The old version drew a fixed decorative path that ignored the data —
+          it swept to the same shape whatever had been screened. This one is
+          built from the plotted scores, so a flat run of rejections reads flat
+          and a spike is a real one. Smoothed with a monotone-ish midpoint
+          spline so it never overshoots above a point and implies a score
+          nothing earned.
+        */}
+        {curve && (
+          <svg
+            className="pointer-events-none absolute inset-0 h-full w-full"
+            viewBox="0 0 1000 200"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            <defs>
+              <linearGradient id="radarStroke" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="#10b981" />
+                <stop offset="70%" stopColor="#10b981" />
+                <stop offset="100%" stopColor={curve.endTone} />
+              </linearGradient>
+              <linearGradient id="radarFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={curve.endTone} stopOpacity="0.22" />
+                <stop offset="100%" stopColor={curve.endTone} stopOpacity="0.02" />
+              </linearGradient>
+            </defs>
+            <path d={`${curve.d} L 1000,200 L 0,200 Z`} fill="url(#radarFill)" />
+            <path
+              d={curve.d}
+              fill="none"
+              stroke="url(#radarStroke)"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          </svg>
+        )}
 
         <div className="absolute inset-0 flex items-end justify-between gap-1 px-5 pb-4">
           {plotted.map((e) => {
