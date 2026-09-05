@@ -7,7 +7,7 @@
  * its id format these fail loudly instead of silently dropping the chain link.
  */
 import assert from 'node:assert/strict';
-import { chainUrlForShard, extractJson, parseShardId } from '../lib/gonka';
+import { chainUrlForShard, extractJson, isModelUnavailable, parseShardId } from '../lib/gonka';
 
 let passed = 0;
 let failed = 0;
@@ -68,6 +68,98 @@ check('handles nested objects and braces inside strings', () => {
 
 check('returns null when there is no object at all', () => {
   assert.equal(extractJson('I cannot answer that.'), null);
+});
+
+console.log('\nModel-unavailable classification');
+
+// The two bodies below are verbatim from the router, captured 5 Sep 2026.
+// If either stops being recognised, a dead model silently re-enters the panel
+// and burns a vote on every verification.
+
+check('recognises the 503 no-channel refusal', () => {
+  assert.equal(
+    isModelUnavailable({
+      status: 503,
+      code: 'model_not_found',
+      message:
+        'No available channel for model moonshotai/Kimi-K2.6 under group default (distributor) (request id: 202609050400184693874718268d9d608Ih1Y7w)',
+    }),
+    true,
+  );
+});
+
+check('recognises it from the nested body when the SDK does not hoist the code', () => {
+  assert.equal(
+    isModelUnavailable({
+      status: 503,
+      error: {
+        code: 'model_not_found',
+        type: 'new_api_error',
+        message: 'No available channel for model moonshotai/Kimi-K2.6 under group default (distributor)',
+      },
+    }),
+    true,
+  );
+});
+
+check('recognises the 400 invalid_model refusal', () => {
+  assert.equal(
+    isModelUnavailable({
+      status: 400,
+      code: 'invalid_model',
+      message: 'model not available for your channel',
+    }),
+    true,
+  );
+});
+
+check('recognises the older unsupported-model wording', () => {
+  // Observed 4 Sep 2026: the catalogue listed Kimi while inference answered
+  // 400 naming the two models it would actually serve.
+  assert.equal(
+    isModelUnavailable({ status: 400, message: 'unsupported model "moonshotai/Kimi-K2.6"' }),
+    true,
+  );
+});
+
+check('does NOT park a model for a rate limit', () => {
+  // 429 is our own concurrency, and parking a healthy model over it would
+  // shrink the panel for ten minutes because we asked too fast.
+  assert.equal(
+    isModelUnavailable({ status: 429, code: 'rate_limit_exceeded', message: 'too many concurrent requests' }),
+    false,
+  );
+});
+
+check('does NOT park a model for a timeout', () => {
+  assert.equal(
+    isModelUnavailable({ name: 'APIConnectionTimeoutError', message: 'Request timed out.' }),
+    false,
+  );
+});
+
+check('does NOT park a model for our own bad request', () => {
+  assert.equal(
+    isModelUnavailable({
+      status: 400,
+      code: 'invalid_request_error',
+      message: "Invalid value for 'max_tokens': must be a positive integer",
+    }),
+    false,
+  );
+});
+
+check('does NOT park a model for an unrelated 503', () => {
+  assert.equal(
+    isModelUnavailable({ status: 503, message: 'upstream connect error, transient overload' }),
+    false,
+  );
+});
+
+check('survives junk without throwing', () => {
+  for (const junk of [null, undefined, 'boom', 0, {}]) {
+    assert.equal(isModelUnavailable(junk), false, `should not park on ${JSON.stringify(junk)}`);
+  }
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

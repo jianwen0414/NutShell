@@ -108,10 +108,24 @@ const CACHE_TTL_MS = 60 * 60 * 1000;
 let cache: { at: number; ids: string[] } | null = null;
 
 export async function resolveSynthesizer(): Promise<string> {
-  return (await synthesizerCandidates())[0]!;
+  const first = (await synthesizerCandidates())[0];
+  if (!first)
+    throw new AppError(
+      "GONKA_UNAVAILABLE",
+      "No model is currently able to run layer 2.",
+    );
+  return first;
 }
 
-/** Every model worth trying for layer 2, best first. */
+/**
+ * Every model worth trying for layer 2, best first.
+ *
+ * Parked models are dropped rather than tried and caught. The loop below
+ * swallows synthesizer failures by design, so a dead model here costs nothing
+ * but a wasted round trip — but it also means the narrative silently falls back
+ * one model further than it needed to, which is the kind of thing that only
+ * shows up as "why is the trace always plain" much later.
+ */
 export async function synthesizerCandidates(): Promise<string[]> {
   const ids = await resolveModels();
   const ordered: string[] = [];
@@ -120,7 +134,7 @@ export async function synthesizerCandidates(): Promise<string[]> {
     if (hit) ordered.push(hit);
   }
   for (const id of ids) if (!ordered.includes(id)) ordered.push(id);
-  return ordered;
+  return usable(ordered);
 }
 
 export async function resolveModels(force = false): Promise<string[]> {
@@ -185,6 +199,91 @@ function recordCall(modelId: string, ok: boolean, detail?: string): void {
   log.push({ ok, at: Date.now(), ...(detail ? { detail: detail.slice(0, 160) } : {}) });
   if (log.length > WINDOW) log.shift();
   calls.set(modelId, log);
+}
+
+/**
+ * Models the router currently has no channel for.
+ *
+ * MEASURED 5 Sep 2026 against the live key, and this is the whole diagnosis:
+ *
+ *   GET /v1/models                 → still lists moonshotai/Kimi-K2.6
+ *   POST /chat/completions (Kimi)  → 503 in 71ms, body:
+ *     {"code":"model_not_found","type":"new_api_error","message":"No available
+ *      channel for model moonshotai/Kimi-K2.6 under group default (distributor)"}
+ *
+ * `(distributor)` and `new_api_error` name the component: that is the Distribute
+ * middleware of New API, the gateway Gonka runs in front of the network. The
+ * message means no ENABLED upstream channel is bound to that model for our
+ * token group — a router-side capacity decision, matching what Gonka said on
+ * 31 Aug about moving resources onto DeepSeek and MiniMax. No client-side
+ * change can bring the model back, and the catalogue keeps advertising it
+ * regardless, which is why availability must never be read from GET /models.
+ *
+ * The refusal is instant and deterministic, so re-asking within one run buys
+ * only duplicate 503s — the quorum-rescue round would fire a second and layer 2
+ * a third. Park the model instead and let the TTL re-probe it: 71ms every few
+ * minutes is the entire cost of noticing the day Gonka turns the channel back
+ * on, and nothing has to be redeployed when they do.
+ */
+const QUARANTINE_MS = Number(process.env.GONKA_QUARANTINE_MS ?? 10 * 60 * 1000);
+const quarantined = new Map<string, { until: number; reason: string }>();
+
+/**
+ * The router refusing the MODEL rather than the request.
+ *
+ * Both observed forms are covered: 503 `model_not_found` for a model with no
+ * channel, and 400 `invalid_model` ("model not available for your channel"),
+ * which is what the same gateway returns for a name its channels cannot serve
+ * at all — verified by asking for a deliberately nonexistent model id.
+ *
+ * Deliberately narrow. A 400 is usually OUR bug, so a bare status is not
+ * enough to park a model on; either the router names the code or the message
+ * says which of these two things happened. A false positive here silently
+ * drops a healthy model out of the panel, which is why it has its own tests.
+ *
+ * Exported for `npm run test:gonka`.
+ */
+export function isModelUnavailable(e: unknown): boolean {
+  const err = e as {
+    status?: number;
+    code?: unknown;
+    message?: string;
+    error?: { code?: unknown; message?: unknown };
+  };
+  const code = String(err?.code ?? err?.error?.code ?? "");
+  if (code === "model_not_found" || code === "invalid_model") return true;
+  const msg = `${err?.message ?? ""} ${String(err?.error?.message ?? "")}`;
+  return (
+    (err?.status === 503 || err?.status === 400) &&
+    /no available channel|not available for your channel|unsupported model/i.test(
+      msg,
+    )
+  );
+}
+
+function quarantine(modelId: string, reason: string): void {
+  if (!quarantined.has(modelId)) {
+    console.warn(
+      `[gonka] ${modelId} parked for ${Math.round(QUARANTINE_MS / 1000)}s — ${reason}`,
+    );
+  }
+  quarantined.set(modelId, { until: Date.now() + QUARANTINE_MS, reason });
+}
+
+function isQuarantined(modelId: string): boolean {
+  const q = quarantined.get(modelId);
+  if (!q) return false;
+  // TTL up: forget it, so the next call re-probes rather than parking forever.
+  if (Date.now() >= q.until) {
+    quarantined.delete(modelId);
+    return false;
+  }
+  return true;
+}
+
+/** Of the models the catalogue offers, the ones worth actually calling. */
+function usable(ids: string[]): string[] {
+  return ids.filter((id) => !isQuarantined(id));
 }
 
 export interface ModelObservation {
@@ -271,7 +370,12 @@ export async function gonkaHealth(): Promise<GonkaHealth> {
     );
 
     // A model the catalogue offers but that has answered nothing we asked it.
+    // Parked models are unioned in: the rolling window is only WINDOW calls
+    // deep, and once a model stops being called its failures eventually age
+    // out of it — at which point a model the router is openly refusing would
+    // start reporting clean.
     const unusable = resolved.filter((id) => {
+      if (isQuarantined(id)) return true;
       const o = observed.find((x) => x.modelId === id);
       return o !== undefined && o.attempts > 0 && o.succeeded === 0;
     });
@@ -668,6 +772,20 @@ export async function chat(
           // SUBSTITUTE model. Our entire premise is three DIFFERENT models
           // judging independently — a silent substitution could have us
           // averaging the same model twice and calling it consensus.
+          //
+          // DO NOT REMOVE THIS TO "FIX" A 503. Measured 5 Sep 2026, same
+          // prompt, same key, seconds apart:
+          //
+          //   Kimi + this header   → 503 model_not_found (no channel)
+          //   Kimi without it      → 200, x-gonka-fallback: Kimi -> MiniMax,
+          //                          body model MiniMaxAI/MiniMax-M2.7
+          //
+          // So dropping the header does make the error disappear — by serving
+          // MiniMax under Kimi's name. The panel would then be MiniMax, Kimi's
+          // slot ALSO MiniMax, and DeepSeek, and a three-model agreement would
+          // be two copies of one opinion. The 503 is the honest answer and the
+          // substituted vote is discarded below for the same reason. Gonka's
+          // own guidance (31 Aug) is to send this header for exactly this case.
           "X-Gonka-No-Fallback": "true",
         },
       },
@@ -742,8 +860,28 @@ async function hedgedChat(
     );
   });
 
+  /**
+   * Short-circuit for a refusal a duplicate cannot fix.
+   *
+   * `Promise.any` settles on the first FULFILLED promise and ignores
+   * rejections until every input has rejected. So when the router refuses a
+   * model outright — 71ms, measured — the primary rejects immediately and then
+   * nothing happens until the hedge fires at HEDGE_AFTER_MS and rejects too.
+   * Measured cost of that: a 71ms refusal reported as 14,129ms, all of it
+   * spent waiting to send a request guaranteed to get the same answer.
+   *
+   * Only model-unavailable qualifies. Every other fast failure stays on the
+   * hedge path, because a second node genuinely might answer where the first
+   * did not — that is the entire point of the hedge.
+   */
+  const refused = new Promise<never>((_, reject) => {
+    primary.catch((e) => {
+      if (isModelUnavailable(e)) reject(e);
+    });
+  });
+
   try {
-    const { r, tag } = await Promise.any([primary, hedge]);
+    const { r, tag } = await Promise.race([Promise.any([primary, hedge]), refused]);
     if (tag === "hedge")
       console.warn(`[gonka] ${modelId}: hedge won, primary was slow`);
     return r;
@@ -767,9 +905,19 @@ async function hedgedChat(
  * disappearing. GONKA_TIMEOUT and GONKA_MALFORMED_JSON are both in the frozen
  * registry and were previously never raised.
  */
-function classify(e: unknown): { code: VoteFailure["code"]; detail: string } {
+function classify(
+  e: unknown,
+  modelId: string,
+): { code: VoteFailure["code"]; detail: string } {
   const err = e as { name?: string; status?: number; message?: string };
   const msg = err?.message ?? String(e);
+  // Checked first: it is the most specific of the three and, unlike the others,
+  // it says something about the model that outlives this call.
+  if (isModelUnavailable(e)) {
+    const detail = `the router has no channel for this model — ${msg}`;
+    quarantine(modelId, detail);
+    return { code: "GONKA_UNAVAILABLE", detail };
+  }
   if (
     err?.name === "APIConnectionTimeoutError" ||
     /timed out|ETIMEDOUT/i.test(msg)
@@ -833,7 +981,7 @@ async function callAnalyst(
       timeoutMs,
     );
   } catch (e) {
-    const { code, detail } = classify(e);
+    const { code, detail } = classify(e, modelId);
     return fail(code, detail);
   }
 
@@ -859,7 +1007,7 @@ async function callAnalyst(
       );
       parsed = parseWith(AnalystSchema, call.content);
     } catch (e) {
-      const { code, detail } = classify(e);
+      const { code, detail } = classify(e, modelId);
       return fail(code, `${code} during repair retry: ${detail}`);
     }
   }
@@ -938,7 +1086,27 @@ export async function verifyThreat(
 ): Promise<VerificationResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const started = Date.now();
-  const models = await resolveModels();
+  const resolved = await resolveModels();
+
+  // The panel is the catalogue minus anything the router has already told us it
+  // cannot serve. Refuse up front rather than firing calls we know will 503:
+  // "the router is serving one model, quorum needs two" is a diagnosis, whereas
+  // the GONKA_QUORUM_FAILED it would otherwise become reads as though the
+  // models had answered and disagreed.
+  const models = usable(resolved);
+  if (models.length < QUORUM_MIN) {
+    throw new AppError(
+      "GONKA_UNAVAILABLE",
+      `Only ${models.length} of ${resolved.length} models are answering; quorum needs ${QUORUM_MIN}.`,
+      {
+        resolved,
+        parked: resolved
+          .filter((id) => quarantined.has(id))
+          .map((id) => `${id}: ${quarantined.get(id)?.reason ?? "unavailable"}`),
+      },
+    );
+  }
+
   opts.onStage?.("layer1");
 
   const verdicts: ModelVerdict[] = [];
@@ -966,9 +1134,15 @@ export async function verifyThreat(
   // hypothetical — and losing quorum kills the whole verification. Retrying
   // costs time only in the failure case, which is exactly when it is worth
   // spending. One extra round, failed models only.
+  //
+  // `usable` again, not just `models`: a model that answered 503 during layer 1
+  // was parked by that failure, and asking it a second time inside the same run
+  // is a guaranteed second 503.
   if (verdicts.length < QUORUM_MIN) {
     opts.onStage?.("retry");
-    await round(models.filter((m) => !verdicts.some((v) => v.modelId === m)));
+    await round(
+      usable(models.filter((m) => !verdicts.some((v) => v.modelId === m))),
+    );
   }
 
   // Throws GONKA_QUORUM_FAILED below 2 — now carrying why each model dropped,
