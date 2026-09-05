@@ -371,6 +371,32 @@ export function ingestItemById(id: string): IngestedItem | null {
  * Idempotent. A headline that already has a job returns it rather than paying
  * for a second opinion on the same sentence.
  */
+/**
+ * Detach a screened headline from the job that verified it.
+ *
+ * Operator-gated, and deliberately narrow: it clears the pointer, nothing
+ * else. The verification it ran still exists and is still reachable at
+ * `/incident/<jobId>` — this does not delete a record, revise a score, or
+ * touch anything the pipeline decided. The headline simply becomes eligible
+ * to be sent through again.
+ *
+ * It exists because a headline can only be run once, and there are two honest
+ * reasons to want a second run: a first attempt that came back on a degraded
+ * panel, and rehearsing or recording the walkthrough, where the same beat has
+ * to be repeatable without waiting for the newswires to produce a fresh story.
+ *
+ * Returns the job it was detached from, so the caller can still find it.
+ */
+export function resetIngestedItem(
+  id: string,
+): { detachedFrom: string | null } | { error: string } {
+  const record = ingestItemById(id);
+  if (!record) return { error: `No screened headline with id ${id}.` };
+  const previous = record.jobId ?? null;
+  delete record.jobId;
+  return { detachedFrom: previous };
+}
+
 export async function verifyIngestedItem(
   id: string,
 ): Promise<{ jobId: string; alreadyRunning: boolean } | { error: string }> {

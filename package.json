@@ -35,6 +35,7 @@
     "health": "tsx scripts/health.ts",
     "hedge": "tsx scripts/dry-run-hedge.ts",
     "demo:decline": "tsx scripts/decline-demo.ts",
+    "demo:reset": "tsx scripts/demo-reset.ts",
     "position:graded": "tsx scripts/open-graded-position.ts",
     "position:settle": "tsx scripts/settle-position.ts",
     "position:import": "tsx scripts/import-position.ts",

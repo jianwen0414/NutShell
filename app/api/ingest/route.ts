@@ -3,6 +3,7 @@ import { newCorrelationId } from "@/lib/ids";
 import {
   ingestStats,
   pollOnce,
+  resetIngestedItem,
   startPolling,
   stopPolling,
   verifyIngestedItem,
@@ -70,10 +71,27 @@ export async function POST(request: Request) {
       }
       return json({ ...outcome, stats: ingestStats() }, correlationId);
     }
+    case "reset": {
+      // Detach a headline from the job that verified it, so it can be sent
+      // through again. Clears the pointer only — the verification it ran is
+      // untouched and still reachable at /incident/<jobId>.
+      if (typeof body?.id !== "string" || !body.id.trim()) {
+        return errorJson(
+          "VALIDATION_FAILED",
+          "Expected the feed item id to reset.",
+          correlationId,
+        );
+      }
+      const outcome = resetIngestedItem(body.id.trim());
+      if ("error" in outcome) {
+        return errorJson("VALIDATION_FAILED", outcome.error, correlationId);
+      }
+      return json({ ...outcome, stats: ingestStats() }, correlationId);
+    }
     default:
       return errorJson(
         "VALIDATION_FAILED",
-        'Expected action to be "start", "stop", "poll" or "verify".',
+        'Expected action to be "start", "stop", "poll", "verify" or "reset".',
         correlationId,
       );
   }
