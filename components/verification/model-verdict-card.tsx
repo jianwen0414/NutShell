@@ -75,14 +75,33 @@ function CopyableId({ value, resolvable, url }: { value: string; resolvable: boo
         </button>
       </div>
       {resolvable && url ? (
-        <a
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          className="block break-all font-mono-code text-[10px] text-cyan-400 underline decoration-cyan-500/40 underline-offset-2 hover:text-cyan-300"
-        >
-          {value}
-        </a>
+        <>
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="block break-all font-mono-code text-[10px] text-cyan-400 underline decoration-cyan-500/40 underline-offset-2 hover:text-cyan-300"
+          >
+            {value}
+          </a>
+          {/*
+            What the link actually proves, said on the card.
+
+            The escrow record names the model, the epoch and the nodes serving
+            that shard — it is genuine third-party confirmation that the model
+            named above is the one the network escrowed for. It does not carry
+            the prompt or the response, and the trailing nonce is not a slot
+            index, so it resolves the SHARD and not this single call. Anyone
+            who follows the link sees an escrow blob with no prompt in it and
+            reasonably asks what they are looking at; better the card answers
+            first. The response hash below is what covers the content.
+          */}
+          <p className="text-[10px] leading-snug text-zinc-600">
+            Resolves the Gonka shard that served this call — the on-chain record
+            names the model and epoch. It holds no prompt or response; the hash
+            below covers those.
+          </p>
+        </>
       ) : (
         <span className="block break-all font-mono-code text-[10px] text-zinc-400">{value}</span>
       )}

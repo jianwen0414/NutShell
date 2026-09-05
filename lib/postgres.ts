@@ -23,6 +23,7 @@ import type {
   VerificationResult,
 } from "@/types";
 import { basescanTxUrl } from "./config";
+import { chainUrlForShard, parseShardId } from "./gonka";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -377,19 +378,34 @@ export async function loadJobFromDb(jobId: string): Promise<RestoredJob | null> 
         modelsResponded: num(v.models_responded),
       };
 
-      const models: ModelVerdict[] = verdicts.rows.map((r) => ({
-        modelId: r.model_id,
-        role: r.role,
-        claimScore: num(r.claim_score),
-        severity: (num(r.severity, 3) || 3) as ModelVerdict["severity"],
-        stance: r.stance,
-        keyEvidence: asJson<string[]>(r.key_evidence, []),
-        redFlags: asJson<string[]>(r.red_flags, []),
-        gonkaRequestId: r.gonka_request_id ?? "",
-        responseHash: r.response_hash ?? "",
-        latencyMs: num(r.latency_ms),
-        parseRepaired: Boolean(r.parse_repaired),
-      }));
+      const models: ModelVerdict[] = verdicts.rows.map((r) => {
+        const requestId = r.gonka_request_id ?? "";
+        // No column holds the chain link, and none needs to: the shard id is
+        // carried inside the request id, and `parseShardId` derives it the
+        // same way the live call path does. Without this a restored verdict
+        // rendered its request id as plain text — the card falls back to
+        // "auditable request reference" when `chainUrl` is absent — so a
+        // restart quietly downgraded the one thing PRD §13.2 asks to be
+        // presented as an on-chain record. Same id, same derivation, so the
+        // restored link is the link the live run showed.
+        const shardId = parseShardId(requestId);
+        return {
+          modelId: r.model_id,
+          role: r.role,
+          claimScore: num(r.claim_score),
+          severity: (num(r.severity, 3) || 3) as ModelVerdict["severity"],
+          stance: r.stance,
+          keyEvidence: asJson<string[]>(r.key_evidence, []),
+          redFlags: asJson<string[]>(r.red_flags, []),
+          gonkaRequestId: requestId,
+          ...(shardId !== undefined
+            ? { chainShardId: shardId, chainUrl: chainUrlForShard(shardId) }
+            : {}),
+          responseHash: r.response_hash ?? "",
+          latencyMs: num(r.latency_ms),
+          parseRepaired: Boolean(r.parse_repaired),
+        };
+      });
 
       restored.verification = {
         correlationId: jobId,
