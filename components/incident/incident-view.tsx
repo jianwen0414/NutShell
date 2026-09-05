@@ -356,11 +356,18 @@ export function IncidentView({ seed }: { seed: IncidentSeed }) {
       idChainResolvable: seed.verification?.idChainResolvable ?? false,
       investigationSkipped: seed.investigationSkipped,
       error: seed.error?.error?.message ?? null,
-      finished: seed.status ? !IN_FLIGHT.has(seed.status) : false,
+      finished:
+        seed.restoredFromDb === true || !seed.status || !IN_FLIGHT.has(seed.status),
     };
     setRun(seeded);
 
-    if (seed.found && seed.status && IN_FLIGHT.has(seed.status)) {
+    // A record rebuilt from the archive is never live, whatever status it was
+    // frozen at. The process that ran it is gone, so its job is not in the
+    // in-memory store and the stream route answers 404 — which the browser
+    // reports as a failed connection and logs in the console. Restored records
+    // commonly sit at VERIFIED or DECIDED, both of which are in the in-flight
+    // set, so this fired on exactly the path the restart contingency depends on.
+    if (seed.found && seed.status && !seed.restoredFromDb && IN_FLIGHT.has(seed.status)) {
       attach(seed.id, seeded);
     }
   }, [seed, attach, setRun]);

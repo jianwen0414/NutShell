@@ -44,7 +44,22 @@ export function shortModelName(modelId: string): string {
   return tail.replace(/[:@].*$/, "");
 }
 
-function CopyableId({ value, resolvable, url }: { value: string; resolvable: boolean; url?: string }) {
+/**
+ * Copy one value, and say which one was taken.
+ *
+ * There used to be a single COPY here and it handed over the full request id,
+ * which is the one string on this card that resolves nowhere. The chain
+ * endpoint takes a uint64 escrow id, so pasting `devshard-71869-403` into it
+ * answers:
+ *
+ *   400 — strconv.ParseUint: parsing "devshard-71869-403": invalid syntax
+ *
+ * A judge who copies, pastes and gets a parse error concludes the link was
+ * decoration. That is a worse outcome than having no button, so the card now
+ * offers both: the id, which is the reference you quote, and the URL, which is
+ * the thing that actually answers when pasted.
+ */
+function CopyButton({ label, value, title }: { label: string; value: string; title: string }) {
   const [copied, setCopied] = useState(false);
 
   const copy = useCallback(() => {
@@ -55,24 +70,43 @@ function CopyableId({ value, resolvable, url }: { value: string; resolvable: boo
         setTimeout(() => setCopied(false), 1400);
       })
       .catch(() => {
-        /* clipboard blocked; the id is still selectable on screen */
+        /* clipboard blocked; the value is still selectable on screen */
       });
   }, [value]);
 
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title={title}
+      className="shrink-0 cursor-pointer rounded border border-[#2d3748] px-1.5 py-0.5 font-mono-code text-[10px] text-zinc-400 transition-colors hover:border-cyan-500/50 hover:text-cyan-300"
+    >
+      {copied ? "COPIED" : label}
+    </button>
+  );
+}
+
+function CopyableId({ value, resolvable, url }: { value: string; resolvable: boolean; url?: string }) {
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between gap-2">
         <span className="font-mono-code text-[10px] uppercase tracking-wider text-zinc-500">
           {resolvable ? "Gonka request · on-chain" : "Auditable request reference"}
         </span>
-        <button
-          type="button"
-          onClick={copy}
-          className="shrink-0 cursor-pointer rounded border border-[#2d3748] px-1.5 py-0.5 font-mono-code text-[10px] text-zinc-400 transition-colors hover:border-cyan-500/50 hover:text-cyan-300"
-          title="Copy the request id"
-        >
-          {copied ? "COPIED" : "COPY"}
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <CopyButton
+            label="COPY ID"
+            value={value}
+            title="Copy the request id — the reference for this call"
+          />
+          {resolvable && url && (
+            <CopyButton
+              label="COPY LINK"
+              value={url}
+              title="Copy the chain-api URL that resolves this shard"
+            />
+          )}
+        </div>
       </div>
       {resolvable && url ? (
         <>
@@ -97,9 +131,11 @@ function CopyableId({ value, resolvable, url }: { value: string; resolvable: boo
             first. The response hash below is what covers the content.
           */}
           <p className="text-[10px] leading-snug text-zinc-600">
-            Resolves the Gonka shard that served this call — the on-chain record
-            names the model and epoch. It holds no prompt or response; the hash
-            below covers those.
+            The middle number is the shard id, and it is the part the chain
+            resolves — the record it returns names the model and the epoch. The
+            full id is the reference for this one call; the chain has no
+            per-inference endpoint to look it up in. Neither holds the prompt or
+            the response: the hash below covers those.
           </p>
         </>
       ) : (
