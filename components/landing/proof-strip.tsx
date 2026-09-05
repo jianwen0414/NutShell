@@ -30,8 +30,26 @@ interface IngestStats {
 
 interface Position {
   status: string;
+  expiry: string;
   premiumPaidUsdc: string;
   notionalProtectedUsdc: string;
+  isExpired?: boolean;
+}
+
+/**
+ * True only while the option can still pay out.
+ *
+ * The stored `status` is not enough: a record sits at OPEN long after its
+ * expiry has passed, and two of the positions on the book right now are
+ * exactly that. Counting them would put lapsed cover in the one strip whose
+ * whole job is to be checkable — and being wrong in the reassuring direction
+ * is the worst way to be wrong on a landing page about insurance. `/protection`
+ * already reads expiry from the option; this did not.
+ */
+function isLive(p: Position): boolean {
+  if (p.isExpired === true) return false;
+  if (p.status !== "OPEN") return false;
+  return Date.parse(p.expiry) > Date.now();
 }
 
 function Tile({
@@ -91,7 +109,7 @@ export function ProofStrip() {
     };
   }, []);
 
-  const open = (positions ?? []).filter((p) => p.status === "OPEN");
+  const open = (positions ?? []).filter(isLive);
   const cover = open.reduce((a, p) => a + Number(p.notionalProtectedUsdc || 0), 0);
   const puts = health?.book?.vanillaPutCount;
   const screened = ingest?.screened;

@@ -5,6 +5,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { useCallback, useRef } from "react";
 import { ProofStrip } from "@/components/landing/proof-strip";
+import { CoverAnchor } from "@/components/landing/cover-anchor";
 import { GateExplorer } from "@/components/landing/gate-explorer";
 import { VerifyConsole } from "@/components/verification/verify-console";
 
@@ -147,28 +148,8 @@ export default function LandingPage() {
               protective put — funded from yield, never from principal.
             </p>
 
-            {/* The anchoring number. Measured on the live book, PRD §1.3. */}
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl border border-[#1e2433] bg-[#080c14]/70 px-5 py-4 backdrop-blur-xl">
-              <div>
-                <div className="font-mono-code text-3xl font-black text-white">$2.15</div>
-                <div className="font-mono-code text-[10px] uppercase tracking-wider text-zinc-500">
-                  premium paid
-                </div>
-              </div>
-              <div className="text-2xl text-zinc-700">→</div>
-              <div>
-                <div className="font-mono-code text-3xl font-black text-emerald-400">$2,443</div>
-                <div className="font-mono-code text-[10px] uppercase tracking-wider text-zinc-500">
-                  downside covered
-                </div>
-              </div>
-              <div className="hidden h-10 w-px bg-[#1e2433] sm:block" />
-              <p className="max-w-[15rem] text-[11px] leading-relaxed text-zinc-400">
-                0.09% of notional for real protection. The reason nobody hedges this way is
-                that you cannot afford to hold it always. A trustworthy trigger changes the
-                arithmetic.
-              </p>
-            </div>
+            {/* The anchoring number, read from the position store. PRD §1.3. */}
+            <CoverAnchor />
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
               <button

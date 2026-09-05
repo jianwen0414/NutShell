@@ -258,7 +258,7 @@ export function AgentConsole() {
           </div>
 
           <Link
-            href="/control"
+            href="/console"
             className="self-start rounded-lg border border-[#2d3748] px-3.5 py-1.5 text-[11px] font-bold text-zinc-300 transition-colors hover:border-cyan-500/50 hover:text-cyan-300 md:self-auto"
           >
             Console →
