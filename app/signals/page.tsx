@@ -30,6 +30,73 @@ interface EventItem {
   reason: string;
   asset: string | null;
   jobId: string | null;
+  /**
+   * What the pipeline made of it. Null while a job is still running, and
+   * absent entirely when the headline never reached one.
+   *
+   * This page used to ignore the field and print a literal "Verifying" against
+   * every kept headline, which is why a record that had finished hours ago —
+   * or had never started — read as a pipeline that had hung.
+   */
+  outcome: {
+    truthScore: number;
+    agreement: number;
+    tier: string;
+    status: string;
+  } | null;
+}
+
+/** The badge, from what actually happened rather than from `kept`. */
+function statusOf(item: EventItem): { label: string; tone: string; title: string } {
+  if (!item.kept) {
+    return {
+      label: "Dismissed",
+      tone: "bg-zinc-500/10 text-zinc-400",
+      title: "Screened out before any model ran.",
+    };
+  }
+  if (!item.jobId) {
+    return {
+      label: "Not verified",
+      tone: "bg-amber-500/10 text-amber-300",
+      title:
+        "Passed screening but never sent to the models — it arrived in the back catalogue on the first poll.",
+    };
+  }
+  if (!item.outcome) {
+    return {
+      label: "Verifying",
+      tone: "bg-cyan-500/10 text-cyan-300",
+      title: "Running now. Three models are scoring it.",
+    };
+  }
+  const { tier, truthScore } = item.outcome;
+  if (tier === "HEDGE_FULL" || tier === "HEDGE_SMALL") {
+    return {
+      label: `Hedged · ${truthScore}`,
+      tone: "bg-red-500/15 text-red-300",
+      title: `${tier} — the policy engine committed budget.`,
+    };
+  }
+  if (tier === "ESCALATE") {
+    return {
+      label: `Escalated · ${truthScore}`,
+      tone: "bg-amber-500/15 text-amber-300",
+      title: "Credible but the panel was split. Nothing spent.",
+    };
+  }
+  if (tier === "REJECT") {
+    return {
+      label: `Rejected · ${truthScore}`,
+      tone: "bg-emerald-500/10 text-emerald-300",
+      title: "The models read it as a false alarm. Nothing spent.",
+    };
+  }
+  return {
+    label: `Watched · ${truthScore}`,
+    tone: "bg-zinc-500/15 text-zinc-300",
+    title: `${tier} — logged and monitored. Nothing spent.`,
+  };
 }
 
 interface Stats {
@@ -92,6 +159,8 @@ export default function FeedPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const { authHeaders, hasToken } = useOperatorToken();
   const [scanning, setScanning] = useState(false);
+  /** Feed id of the headline being pushed into the pipeline by hand. */
+  const [verifying, setVerifying] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   // Expansion is rendered state, so it lives in state. It was held in a ref
@@ -101,17 +170,34 @@ export default function FeedPage() {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [visible, setVisible] = useState(30);
 
-  // Two calls, because the contract fixes /api/events as a bare array and
-  // leaves the counters nowhere to live. They are fetched together so the
-  // tiles and the list never disagree about what has been screened.
+  // Three calls. The counters live on /api/ingest because the contract fixes
+  // /api/events as a bare array with nowhere to put them.
+  //
+  // The promoted items are asked for BY NAME rather than hoped for inside the
+  // recent window. A day of newswire traffic runs to hundreds of headlines and
+  // only a handful reach a job; take a slice off the front and the records
+  // worth opening are exactly the ones that fall off the end. Measured: with
+  // 288 screened, the three verified records sat at index 274, 278 and 285, so
+  // a 120-item window contained none of them and not one headline on this page
+  // was clickable. The dashboard already fetched this way; this page did not.
   const load = useCallback(async () => {
     try {
-      const [eventsRes, statsRes] = await Promise.all([
-        fetch("/api/events?limit=120"),
+      const [recentRes, keptRes, statsRes] = await Promise.all([
+        fetch("/api/events?limit=150"),
+        fetch("/api/events?kept=true&limit=60"),
         fetch("/api/ingest"),
       ]);
-      const events = await eventsRes.json();
-      setItems(Array.isArray(events) ? events : []);
+      const recent = recentRes.ok ? await recentRes.json() : [];
+      const kept = keptRes.ok ? await keptRes.json() : [];
+      const byId = new Map<string, EventItem>();
+      for (const e of [...(Array.isArray(recent) ? recent : []), ...(Array.isArray(kept) ? kept : [])]) {
+        byId.set(e.id, e);
+      }
+      setItems(
+        [...byId.values()].sort(
+          (a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt),
+        ),
+      );
       setStats(statsRes.ok ? await statsRes.json() : null);
     } catch {
       /* the next tick retries */
@@ -155,8 +241,9 @@ export default function FeedPage() {
       } else {
         const r = body.result;
         setNotice(
-          `Read ${r.fetched} headlines. ${r.fresh} new, ${r.kept} passed screening` +
-            (r.seeded ? ", baseline established so no verification started." : "."),
+          `Read ${r.fetched} headlines. ${r.fresh} new, ${r.kept} passed screening, ` +
+            `${r.started} sent to the models` +
+            (r.seeded ? " — the rest is back catalogue and was recorded, not verified." : "."),
         );
         await load();
       }
@@ -164,6 +251,41 @@ export default function FeedPage() {
       setNotice(e instanceof Error ? e.message : "Scan failed.");
     } finally {
       setScanning(false);
+    }
+  }
+
+  /**
+   * Push one already-screened headline through the pipeline.
+   *
+   * The automated path is real but it is at the mercy of the newswires: over
+   * two hours of polling, nothing fresh passed the gates. This is how the
+   * same path is shown on demand — the same triage verdict, the same six
+   * stages, started by hand rather than by the timer.
+   */
+  async function verifyNow(id: string) {
+    setVerifying(id);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/ingest", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ action: "verify", id }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        setNotice(body?.error?.message ?? "Could not start verification.");
+        return;
+      }
+      setNotice(
+        body.alreadyRunning
+          ? "That headline already has a record."
+          : "Started. The six stages take about two minutes — the badge follows it.",
+      );
+      await load();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Could not start verification.");
+    } finally {
+      setVerifying(null);
     }
   }
 
@@ -363,15 +485,17 @@ export default function FeedPage() {
                         </div>
                       </div>
 
-                      <span
-                        className={`shrink-0 rounded-full px-2.5 py-1 font-mono-code text-[10px] font-semibold uppercase tracking-wider ${
-                          item.kept
-                            ? "bg-emerald-500/10 text-emerald-300"
-                            : "bg-zinc-500/10 text-zinc-400"
-                        }`}
-                      >
-                        {item.kept ? "Verifying" : "Dismissed"}
-                      </span>
+                      {(() => {
+                        const s = statusOf(item);
+                        return (
+                          <span
+                            title={s.title}
+                            className={`shrink-0 rounded-full px-2.5 py-1 font-mono-code text-[10px] font-semibold uppercase tracking-wider ${s.tone}`}
+                          >
+                            {s.label}
+                          </span>
+                        );
+                      })()}
                     </div>
 
                     <button
@@ -410,6 +534,29 @@ export default function FeedPage() {
                             >
                               Open the full record →
                             </Link>
+                          )}
+                          {/*
+                            A headline the screening promoted but the seeding
+                            pass never verified. Without this it is a dead end:
+                            reasoned about, marked as passed, and pointing at
+                            nothing a reader can open.
+                          */}
+                          {item.kept && !item.jobId && (
+                            <button
+                              type="button"
+                              onClick={() => void verifyNow(item.id)}
+                              disabled={verifying === item.id || !hasToken}
+                              title={
+                                hasToken
+                                  ? "Sends this headline through the full six-stage pipeline now."
+                                  : "Needs the operator token — enter it once on the console."
+                              }
+                              className="cursor-pointer font-semibold text-emerald-400 transition-colors hover:text-emerald-300 disabled:cursor-not-allowed disabled:text-zinc-600"
+                            >
+                              {verifying === item.id
+                                ? "Starting the pipeline…"
+                                : "Run the pipeline on this →"}
+                            </button>
                           )}
                           <span className="text-zinc-600">
                             Seen {relative(item.ingestedAt)}
