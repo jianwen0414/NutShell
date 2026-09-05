@@ -116,7 +116,18 @@ export default function LandingPage() {
 
       <main className="relative">
         {/* ── Hero ──────────────────────────────────────────────────────── */}
-        <section className="mx-auto flex min-h-[calc(100svh-57px)] max-w-6xl flex-col justify-center gap-10 px-5 pb-10 pt-14 sm:px-8">
+        {/*
+          `data-backdrop` asks the canvas for the shader. The two sections a
+          visitor actually operates — the paste box and the agreement slider —
+          deliberately carry no mark, so the backdrop clears out for the length
+          of the demo and comes back for the prose underneath. The prose asks
+          for `lit-soft`: its copy is smaller and set wider than the hero's, so
+          it takes the shader at a ceiling rather than at full strength.
+        */}
+        <section
+          data-backdrop="lit"
+          className="mx-auto flex min-h-[calc(100svh-57px)] max-w-6xl flex-col justify-center gap-10 px-5 pb-10 pt-14 sm:px-8"
+        >
           <div className="max-w-3xl space-y-6">
             <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-950/30 px-3 py-1 backdrop-blur-sm">
               <span className="relative flex h-1.5 w-1.5">
@@ -216,7 +227,7 @@ export default function LandingPage() {
         </section>
 
         {/* ── How ───────────────────────────────────────────────────────── */}
-        <section className="mx-auto max-w-6xl px-5 py-16 sm:px-8">
+        <section data-backdrop="lit-soft" className="mx-auto max-w-6xl px-5 py-16 sm:px-8">
           <div className="mb-10 space-y-3">
             <div className="font-mono-code text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-400">
               Six stages, one correlation id
@@ -267,7 +278,7 @@ export default function LandingPage() {
         </section>
 
         {/* ── Security ──────────────────────────────────────────────────── */}
-        <section className="mx-auto max-w-6xl px-5 pb-20 sm:px-8">
+        <section data-backdrop="lit-soft" className="mx-auto max-w-6xl px-5 pb-20 sm:px-8">
           <div className="rounded-3xl border border-[#1e2433] bg-[#0a0f18]/70 p-6 backdrop-blur-sm sm:p-8">
             <h2 className="font-mono-code text-lg font-black tracking-tight text-white">
               What the agent is allowed to do

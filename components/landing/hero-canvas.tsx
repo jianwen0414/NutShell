@@ -1,423 +1,194 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import * as THREE from "three";
-import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { useEffect, useRef, useSyncExternalStore } from "react";
+import { ShaderBackground } from "@/components/ui/shader-background";
 
 /**
  * The landing backdrop.
  *
- * Adapted from a 21st.dev horizon hero. Kept: the layered starfield, the
- * nebula plane and the scroll-driven camera. Changed, and the reasons matter
- * more than the diff:
+ * This used to be a hand-ported three.js horizon — starfield, nebula plane,
+ * bloom pass, four alpine ridges. It is now the 21st.dev "Mesh drift" shader,
+ * kept verbatim in `components/ui/shader-background.tsx` so it stays
+ * upgradable: same uniforms, same palette, same timing the builder emitted.
+ * Its greens already are the product's greens, which is why it landed here.
+ *
+ * Everything this file adds is integration, not art direction:
  *
  *   · It is a fixed backdrop, not a scroll-hijacker. The page in front of it
  *     carries a paste box that is a graded deliverable, so the canvas may
  *     never own the scroll or swallow a click. It renders behind everything
  *     with pointer-events off.
- *   · The original dereferenced `refs.nebula` and `refs.mountains[3]` inside
- *     the scroll handler with no guard. Both are populated asynchronously
- *     during init, and a scroll event arriving first throws — which on this
- *     page would take the hero down on the one machine that scrolls early.
- *   · Palette moved onto the product's own tokens.
- *   · The animation loop stops when the tab is hidden. A hackathon laptop
- *     running a demo does not need a 60fps bloom pass on a background tab.
- *
- * It degrades to a still gradient, painted by the parent, whenever WebGL is
- * unavailable or the viewer has asked for reduced motion. The page must read
- * correctly with nothing here at all.
+ *   · The shader is opaque and bright by design. Two scrims sit over it, and
+ *     both earn their place: the vertical one darkens the header strip and
+ *     lands the page on its own ground at the fold, the left-weighted one
+ *     darkens only the column the hero text occupies. Both are pitched so the
+ *     worst case — white type over the palette's pale lime — still clears
+ *     4.5:1, and no darker, because the whole point was to see the shader.
+ *   · The shader is lit by the page, not by a scroll distance. Any section
+ *     that wants it carries `data-backdrop="lit"`, and the opacity tracks how
+ *     much of the viewport those sections currently fill. The two sections a
+ *     visitor actually operates — the paste box and the agreement slider —
+ *     opt out, so the shader fades away for the length of the demo and comes
+ *     back for the prose underneath it. A scroll-distance ramp cannot do that
+ *     without hard-coding offsets that break the moment a section is added.
+ *   · Reduced motion gets the gradient alone, and so does any machine with no
+ *     WebGL context — the shader component returns early and leaves a
+ *     transparent canvas. The page must read correctly with nothing here.
  */
 
-interface SceneRefs {
-  scene: THREE.Scene | null;
-  camera: THREE.PerspectiveCamera | null;
-  renderer: THREE.WebGLRenderer | null;
-  composer: EffectComposer | null;
-  stars: THREE.Points[];
-  nebula: THREE.Mesh | null;
-  ridges: THREE.Mesh[];
-  frame: number | null;
-  target: { x: number; y: number; z: number };
+/**
+ * Sections that want the shader behind them mark themselves with this.
+ *
+ * `lit` is the hero: the scrims are cut for its exact column, so it gets the
+ * shader at full strength. `lit-soft` is the prose below the demo, whose copy
+ * is smaller, dimmer and set wider than the hero's — far enough right to run
+ * past where the wash has fallen away. Measured over the palette's brightest
+ * green, the 10px cyan eyebrow there lands at 2.8:1 with the shader at full
+ * strength, so that run gets a ceiling instead.
+ */
+const LIT = '[data-backdrop^="lit"]';
+const SOFT = 0.6;
+
+/**
+ * How much of the viewport lit sections have to fill for the shader to be at
+ * full strength, and how little before it is gone. The hero is one viewport
+ * tall, so 0.65 puts its fade-out a third of the way down it and 0.1 finishes
+ * as its last line leaves — the same curve this had when it was a ramp on
+ * `scrollY`, now derived rather than dialled in.
+ */
+const LIT_FULL = 0.65;
+const LIT_FLOOR = 0.1;
+
+/**
+ * The OS motion preference, read as an external store rather than mirrored
+ * into state from an effect. `matchMedia` has no server answer, and a viewer
+ * who changes the setting with the tab open gets the shader taken away or
+ * given back without a reload.
+ */
+const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
+
+function subscribeToMotion(onChange: () => void) {
+  const query = window.matchMedia(REDUCED_MOTION);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
 }
 
-const STAR_COLORS = {
-  white: new THREE.Color(0xf1f5f9),
-  emerald: new THREE.Color(0x10b981),
-  cyan: new THREE.Color(0x06b6d4),
-};
+function readMotion() {
+  return !window.matchMedia(REDUCED_MOTION).matches;
+}
+
+/** Nothing animates before hydration; the gradient alone is a whole design. */
+function readMotionOnServer() {
+  return false;
+}
 
 export function HeroCanvas() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const refs = useRef<SceneRefs>({
-    scene: null,
-    camera: null,
-    renderer: null,
-    composer: null,
-    stars: [],
-    nebula: null,
-    ridges: [],
-    frame: null,
-    target: { x: 0, y: 24, z: 300 },
-  });
-  const smoothed = useRef({ x: 0, y: 24, z: 300 });
+  const animated = useSyncExternalStore(
+    subscribeToMotion,
+    readMotion,
+    readMotionOnServer,
+  );
+  const layerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const layer = layerRef.current;
+    if (!animated || !layer) return;
 
-    // Respect the OS setting before spending anything on a GPU context. The
-    // canvas element stays mounted and simply never gets drawn to — it is
-    // transparent over the gradient below, so bailing here needs no state and
-    // no re-render.
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    let frame = 0;
 
-    const r = refs.current;
-    // A phone rendering 15,000 shader-driven points through a bloom pass is a
-    // dropped-frame slideshow, so the small screen gets a lighter scene.
-    const compact = window.innerWidth < 768;
-    const starCount = compact ? 1400 : 4200;
-    const layers = compact ? 2 : 3;
+    const paint = () => {
+      frame = 0;
+      const height = Math.max(window.innerHeight, 1);
 
-    try {
-      r.renderer = new THREE.WebGLRenderer({ canvas, antialias: !compact, alpha: true });
-    } catch {
-      // No WebGL context. The gradient underneath is the whole design in that
-      // case, and the page above it never depended on this running.
-      return;
-    }
-
-    r.scene = new THREE.Scene();
-    r.scene.fog = new THREE.FogExp2(0x05070b, 0.00025);
-
-    r.camera = new THREE.PerspectiveCamera(
-      70,
-      window.innerWidth / window.innerHeight,
-      0.1,
-      2000,
-    );
-    r.camera.position.set(0, 24, 300);
-
-    r.renderer.setSize(window.innerWidth, window.innerHeight);
-    r.renderer.setPixelRatio(Math.min(window.devicePixelRatio, compact ? 1.5 : 2));
-    r.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    r.renderer.toneMappingExposure = 0.5;
-
-    r.composer = new EffectComposer(r.renderer);
-    r.composer.addPass(new RenderPass(r.scene, r.camera));
-    if (!compact) {
-      r.composer.addPass(
-        new UnrealBloomPass(
-          new THREE.Vector2(window.innerWidth, window.innerHeight),
-          0.32,
-          0.6,
-          0.92,
-        ),
-      );
-    }
-
-    // ── Starfield ───────────────────────────────────────────────────────────
-    for (let layer = 0; layer < layers; layer++) {
-      const geometry = new THREE.BufferGeometry();
-      const positions = new Float32Array(starCount * 3);
-      const colors = new Float32Array(starCount * 3);
-      const sizes = new Float32Array(starCount);
-
-      for (let i = 0; i < starCount; i++) {
-        const radius = 220 + Math.random() * 780;
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.acos(Math.random() * 2 - 1);
-
-        positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
-        positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
-        positions[i * 3 + 2] = radius * Math.cos(phi);
-
-        const roll = Math.random();
-        const color =
-          roll < 0.78 ? STAR_COLORS.white : roll < 0.92 ? STAR_COLORS.emerald : STAR_COLORS.cyan;
-        colors[i * 3] = color.r;
-        colors[i * 3 + 1] = color.g;
-        colors[i * 3 + 2] = color.b;
-
-        sizes[i] = Math.random() * 2.4 + 0.7;
+      // Re-queried each pass rather than cached: sections arrive with the
+      // dynamic import and the console below grows as it fills, and a stale
+      // node list would light the wrong stretch of the page.
+      const spans: Array<[number, number, number]> = [];
+      for (const section of document.querySelectorAll<HTMLElement>(LIT)) {
+        const rect = section.getBoundingClientRect();
+        const top = Math.max(rect.top, 0);
+        const bottom = Math.min(rect.bottom, height);
+        const ceiling = section.dataset.backdrop === "lit" ? 1 : SOFT;
+        if (bottom > top) spans.push([top, bottom, ceiling]);
       }
+      spans.sort((a, b) => a[0] - b[0]);
 
-      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-      geometry.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
-
-      const material = new THREE.ShaderMaterial({
-        uniforms: { time: { value: 0 }, depth: { value: layer } },
-        vertexShader: `
-          attribute float size;
-          attribute vec3 color;
-          varying vec3 vColor;
-          uniform float time;
-          uniform float depth;
-
-          void main() {
-            vColor = color;
-            vec3 pos = position;
-            float angle = time * 0.04 * (1.0 - depth * 0.3);
-            mat2 rot = mat2(cos(angle), -sin(angle), sin(angle), cos(angle));
-            pos.xy = rot * pos.xy;
-            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-            gl_PointSize = size * (300.0 / -mvPosition.z);
-            gl_Position = projectionMatrix * mvPosition;
-          }
-        `,
-        fragmentShader: `
-          varying vec3 vColor;
-          void main() {
-            float dist = length(gl_PointCoord - vec2(0.5));
-            if (dist > 0.5) discard;
-            float opacity = 1.0 - smoothstep(0.0, 0.5, dist);
-            gl_FragColor = vec4(vColor, opacity);
-          }
-        `,
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-
-      const points = new THREE.Points(geometry, material);
-      r.scene.add(points);
-      r.stars.push(points);
-    }
-
-    // ── Nebula ──────────────────────────────────────────────────────────────
-    {
-      const geometry = new THREE.PlaneGeometry(8000, 4000, 64, 64);
-      const material = new THREE.ShaderMaterial({
-        uniforms: {
-          time: { value: 0 },
-          colorA: { value: new THREE.Color(0x065f46) },
-          colorB: { value: new THREE.Color(0x0c4a6e) },
-          opacity: { value: 0.30 },
-        },
-        vertexShader: `
-          varying vec2 vUv;
-          varying float vElevation;
-          uniform float time;
-
-          void main() {
-            vUv = uv;
-            vec3 pos = position;
-            float elevation = sin(pos.x * 0.01 + time) * cos(pos.y * 0.01 + time) * 20.0;
-            pos.z += elevation;
-            vElevation = elevation;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
-          }
-        `,
-        fragmentShader: `
-          uniform vec3 colorA;
-          uniform vec3 colorB;
-          uniform float opacity;
-          uniform float time;
-          varying vec2 vUv;
-          varying float vElevation;
-
-          void main() {
-            float mixFactor = sin(vUv.x * 8.0 + time) * cos(vUv.y * 8.0 + time);
-            vec3 color = mix(colorA, colorB, mixFactor * 0.5 + 0.5);
-            float alpha = opacity * (1.0 - length(vUv - 0.5) * 2.0);
-            alpha *= 1.0 + vElevation * 0.01;
-            gl_FragColor = vec4(color, max(alpha, 0.0));
-          }
-        `,
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      });
-
-      const nebula = new THREE.Mesh(geometry, material);
-      nebula.position.z = -1050;
-      r.scene.add(nebula);
-      r.nebula = nebula;
-    }
-
-    // ── Horizon ridges ──────────────────────────────────────────────────────
-    //
-    // The original shipped four alpine silhouettes. Same geometry, recoloured
-    // into the product's own dark teals so the hero reads as a horizon being
-    // watched rather than a landing page for a ski resort.
-    {
-      const ridgeLayers = [
-        { distance: -50, height: 60, color: 0x0b1220, opacity: 1 },
-        { distance: -100, height: 80, color: 0x0a1a24, opacity: 0.82 },
-        { distance: -150, height: 100, color: 0x08262f, opacity: 0.6 },
-        { distance: -200, height: 120, color: 0x073640, opacity: 0.42 },
-      ];
-
-      ridgeLayers.forEach((layer, index) => {
-        const points: THREE.Vector2[] = [];
-        const segments = 50;
-        for (let i = 0; i <= segments; i++) {
-          const x = (i / segments - 0.5) * 1000;
-          const y =
-            Math.sin(i * 0.1) * layer.height +
-            Math.sin(i * 0.05) * layer.height * 0.5 +
-            Math.random() * layer.height * 0.2 -
-            100;
-          points.push(new THREE.Vector2(x, y));
+      // Union, not sum. The footer begins where the section above it ends, and
+      // counting a shared edge twice would report more lit viewport than there
+      // is — enough, at the bottom of the page, to pin the shader at full
+      // strength on a screen that is mostly something else.
+      let covered = 0;
+      let reached = 0;
+      let ceiling = 0;
+      for (const [top, bottom, cap] of spans) {
+        const from = Math.max(top, reached);
+        if (bottom > from) {
+          covered += bottom - from;
+          reached = bottom;
+          ceiling = Math.max(ceiling, cap);
         }
-        points.push(new THREE.Vector2(5000, -300));
-        points.push(new THREE.Vector2(-5000, -300));
-
-        const geometry = new THREE.ShapeGeometry(new THREE.Shape(points));
-        const material = new THREE.MeshBasicMaterial({
-          color: layer.color,
-          transparent: true,
-          opacity: layer.opacity,
-          side: THREE.DoubleSide,
-        });
-
-        const ridge = new THREE.Mesh(geometry, material);
-        ridge.position.z = layer.distance;
-        ridge.position.y = layer.distance;
-        ridge.userData = { baseZ: layer.distance, index };
-        r.scene!.add(ridge);
-        r.ridges.push(ridge);
-      });
-    }
-
-    // The original also carried an atmosphere sphere. It is gone: the camera
-    // sits inside it, so its rim term painted a pale disc across the middle of
-    // the frame — directly behind the headline — and the nebula already
-    // supplies the edge glow it was there for.
-
-    // ── Loop ────────────────────────────────────────────────────────────────
-    let running = true;
-
-    const animate = () => {
-      if (!running) return;
-      r.frame = requestAnimationFrame(animate);
-
-      const time = Date.now() * 0.001;
-
-      for (const field of r.stars) {
-        const mat = field.material as THREE.ShaderMaterial;
-        if (mat.uniforms?.time) mat.uniforms.time.value = time;
-      }
-      if (r.nebula) {
-        const mat = r.nebula.material as THREE.ShaderMaterial;
-        if (mat.uniforms?.time) mat.uniforms.time.value = time * 0.5;
       }
 
-      if (r.camera) {
-        const ease = 0.05;
-        smoothed.current.x += (r.target.x - smoothed.current.x) * ease;
-        smoothed.current.y += (r.target.y - smoothed.current.y) * ease;
-        smoothed.current.z += (r.target.z - smoothed.current.z) * ease;
+      const coverage = covered / height;
+      const opacity =
+        Math.min(
+          Math.max((coverage - LIT_FLOOR) / (LIT_FULL - LIT_FLOOR), 0),
+          1,
+        ) * ceiling;
 
-        r.camera.position.x = smoothed.current.x + Math.sin(time * 0.1) * 2;
-        r.camera.position.y = smoothed.current.y + Math.cos(time * 0.15) * 1;
-        r.camera.position.z = smoothed.current.z;
-        r.camera.lookAt(0, 10, -600);
-      }
-
-      r.ridges.forEach((ridge, i) => {
-        const parallax = 1 + i * 0.5;
-        ridge.position.x = Math.sin(time * 0.1) * 2 * parallax;
-        ridge.position.y = (ridge.userData.baseZ as number) + Math.cos(time * 0.15) * parallax;
-      });
-
-      r.composer?.render();
+      layer.style.opacity = opacity.toFixed(3);
+      // `display: none` rather than opacity alone, and only once no lit
+      // section is on screen at all. The shader watches its own canvas with an
+      // IntersectionObserver and parks its render loop the moment that canvas
+      // has no box — so this is what actually stops a full-screen fragment
+      // shader running at 60fps behind the demo.
+      layer.style.display = covered === 0 ? "none" : "";
     };
 
-    animate();
-
-    // ── Scroll ──────────────────────────────────────────────────────────────
-    //
-    // The camera answers to the first two viewport heights and then holds. Past
-    // that the visitor is reading the verification report, and a camera still
-    // drifting behind it is a distraction, not an effect.
     const onScroll = () => {
-      const span = window.innerHeight * 2;
-      const progress = Math.min(window.scrollY / span, 1);
-
-      r.target.x = 0;
-      r.target.y = 24 + progress * 26;
-      r.target.z = 300 - progress * 350;
-
-      // Guarded. Both of these are populated during init and a scroll event
-      // can land first; the original dereferenced them unconditionally.
-      if (r.nebula && r.ridges.length > 0) {
-        const deepest = r.ridges[r.ridges.length - 1];
-        r.nebula.position.z = (deepest.userData.baseZ as number) - 900 + progress * 300;
-      }
+      if (frame === 0) frame = requestAnimationFrame(paint);
     };
 
-    const onResize = () => {
-      if (!r.camera || !r.renderer || !r.composer) return;
-      r.camera.aspect = window.innerWidth / window.innerHeight;
-      r.camera.updateProjectionMatrix();
-      r.renderer.setSize(window.innerWidth, window.innerHeight);
-      r.composer.setSize(window.innerWidth, window.innerHeight);
-    };
+    // Scrolling is not the only thing that moves a section past the viewport.
+    // A verdict arriving in the console, or the agreement slider redrawing the
+    // panel beside it, shifts everything below without a scroll event.
+    const reflow = new ResizeObserver(onScroll);
+    reflow.observe(document.body);
 
-    const onVisibility = () => {
-      if (document.hidden) {
-        running = false;
-        if (r.frame) cancelAnimationFrame(r.frame);
-        r.frame = null;
-      } else if (!running) {
-        running = true;
-        animate();
-      }
-    };
-
+    paint();
     window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onResize);
-    document.addEventListener("visibilitychange", onVisibility);
-    onScroll();
+    window.addEventListener("resize", onScroll);
 
     return () => {
-      running = false;
-      if (r.frame) cancelAnimationFrame(r.frame);
+      cancelAnimationFrame(frame);
+      reflow.disconnect();
       window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onResize);
-      document.removeEventListener("visibilitychange", onVisibility);
-
-      for (const field of r.stars) {
-        field.geometry.dispose();
-        (field.material as THREE.Material).dispose();
-      }
-      for (const ridge of r.ridges) {
-        ridge.geometry.dispose();
-        (ridge.material as THREE.Material).dispose();
-      }
-      r.nebula?.geometry.dispose();
-      if (r.nebula) (r.nebula.material as THREE.Material).dispose();
-      r.composer?.dispose();
-      r.renderer?.dispose();
-
-      r.stars = [];
-      r.ridges = [];
-      r.nebula = null;
-      r.composer = null;
-      r.renderer = null;
-      r.scene = null;
-      r.camera = null;
+      window.removeEventListener("resize", onScroll);
     };
-  }, []);
+  }, [animated]);
 
   return (
     <div className="pointer-events-none fixed inset-0 -z-10" aria-hidden="true">
       {/* Painted regardless, so the page has a ground even with no GPU. */}
       <div className="absolute inset-0 bg-[radial-gradient(120%_80%_at_50%_-10%,#072320_0%,#050f18_40%,#04060a_74%,#04060a_100%)]" />
-      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+
+      {animated ? (
+        <div ref={layerRef} className="absolute inset-0">
+          <ShaderBackground className="h-full w-full" />
+        </div>
+      ) : null}
+
+      {/* Vertical: the header strip, then the fold. */}
+      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(4,6,10,0.62)_0%,rgba(4,6,10,0.18)_22%,rgba(4,6,10,0.20)_58%,rgba(4,6,10,0.72)_88%,#04060a_100%)]" />
       {/*
-        Two overlays, and both earn their place. The scrim holds body copy at
-        an accessible ratio over whatever the scene happens to be doing behind
-        it; the left-weighted wash darkens the column the text actually
-        occupies, so the hero can stay bright on the right where nothing is
-        being read.
+        Horizontal, and it has to come in two sizes. Past `xl` the hero text
+        stops around 63% of the frame and the wash can fall away to nothing,
+        which is where the shader gets to be itself. Below `xl` the same copy
+        runs to both edges — there is no clear column left to darken, so the
+        wash goes near-flat and the art gives way to the reading.
       */}
-      <div className="absolute inset-0 bg-gradient-to-b from-[#04060a]/35 via-transparent to-[#04060a]" />
-      <div className="absolute inset-0 bg-[linear-gradient(100deg,#04060a_0%,rgba(4,6,10,0.82)_38%,rgba(4,6,10,0.35)_62%,transparent_88%)]" />
+      <div className="absolute inset-0 bg-[linear-gradient(102deg,rgba(4,6,10,0.76)_0%,rgba(4,6,10,0.72)_45%,rgba(4,6,10,0.66)_100%)] xl:hidden" />
+      <div className="absolute inset-0 hidden bg-[linear-gradient(102deg,rgba(4,6,10,0.68)_0%,rgba(4,6,10,0.66)_40%,rgba(4,6,10,0.26)_64%,rgba(4,6,10,0.06)_82%,transparent_94%)] xl:block" />
     </div>
   );
 }
