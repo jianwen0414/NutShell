@@ -36,6 +36,39 @@ export interface IngestedItem {
 /** Kept in memory, newest first. Enough for the dashboard, not a database. */
 const MAX_HISTORY = 300;
 
+/**
+ * How fresh a headline has to be to be worth verifying on the very first poll.
+ *
+ * The seeding pass exists so a boot does not spend real inference re-reading a
+ * day of back catalogue. But "everything on the first poll is old news" is not
+ * true: a feed read at 09:00 carries whatever broke at 08:55, and refusing to
+ * look at it means the automated path cannot demonstrate itself until the next
+ * genuinely new story arrives — which, measured over 142 polls, was never.
+ *
+ * So the seeding pass still declines the back catalogue, and still verifies
+ * anything published inside this window, capped so a busy morning cannot turn
+ * a server restart into an unbounded inference bill.
+ */
+const SEED_FRESH_MS = Number(process.env.INGEST_SEED_FRESH_MS ?? 90 * 60_000);
+const SEED_MAX_JOBS = Number(process.env.INGEST_SEED_MAX_JOBS ?? 2);
+
+/**
+ * Is a headline recent enough that the seeding pass should still verify it?
+ *
+ * Exported so the window can be tested without a network round trip and a
+ * Gonka bill. Takes `now` rather than reading the clock, because a gate that
+ * reads the clock cannot be tested at a boundary.
+ */
+export function seedFreshnessGate(now: number): (publishedAt: string) => boolean {
+  const cutoff = now - SEED_FRESH_MS;
+  return (publishedAt: string) => {
+    const at = Date.parse(publishedAt);
+    // An unparseable date is back catalogue as far as this is concerned:
+    // NaN >= cutoff is false, but say so rather than leaning on that.
+    return Number.isFinite(at) && at >= cutoff;
+  };
+}
+
 interface IngestState {
   /** Feed ids already handled, so a headline is never verified twice. */
   seen: Set<string>;
@@ -75,11 +108,39 @@ export function alreadySeen(id: string): boolean {
   return state().seen.has(id);
 }
 
+/**
+ * Order by publication time and trim, protecting anything that reached a job.
+ *
+ * Insertion order used to stand in for recency, and it stopped being a good
+ * proxy the moment two producers wrote to the same list. The worked corpus is
+ * laid down at boot; the poller then unshifts every live headline on top of
+ * it, so a story published 90 minutes ago sat at index 274 of 288 behind a
+ * back catalogue reaching back to January. Everything downstream reads a
+ * window off the front of this list, so the only records carrying a
+ * verification — the ones worth clicking — were the only ones never in it.
+ *
+ * The trim protects items with a `jobId` for the same reason: those cost real
+ * inference and are the audit trail. Discarding them to make room for another
+ * dismissed headline would delete evidence to keep noise.
+ */
+function reorder(s: IngestState): void {
+  s.history.sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
+  if (s.history.length <= MAX_HISTORY) return;
+
+  const keep: IngestedItem[] = [];
+  const spill: IngestedItem[] = [];
+  for (const item of s.history) (item.jobId ? keep : spill).push(item);
+  // Verified records first, then as much of the rest as fits, re-sorted.
+  s.history = [...keep, ...spill.slice(0, Math.max(0, MAX_HISTORY - keep.length))].sort(
+    (a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt),
+  );
+}
+
 function remember(item: IngestedItem): void {
   const s = state();
   s.seen.add(item.id);
   s.history.unshift(item);
-  if (s.history.length > MAX_HISTORY) s.history.length = MAX_HISTORY;
+  reorder(s);
 }
 
 /**
@@ -191,13 +252,33 @@ export async function pollOnce(opts: { force?: boolean } = {}): Promise<PollResu
 
     let kept = 0;
     let startedJobs = 0;
-    // Oldest first, because `remember` unshifts. Ingesting a newest-first list
-    // would leave the history reversed, and the trim to MAX_HISTORY would then
-    // discard the newest items rather than the stalest ones.
-    for (const item of [...fresh].reverse()) {
-      const record = await ingestItem(item, { startJobs: !seeded });
+
+    // Newest first. `reorder` sorts the history by publication time, so the
+    // write order no longer decides what the page shows — which frees this
+    // loop to spend the seeding budget on the freshest headlines rather than
+    // whatever happens to come out of the parser last.
+    //
+    // On the seeding pass most of this is back catalogue and none of it is
+    // verified, except headlines published inside the freshness window: that
+    // is live news which broke while the server was down, and declining to
+    // look at it is why the automated path could go a whole session without
+    // producing a single record.
+    //
+    // The budget is counted against jobs that actually START, not against
+    // candidates. Reserving it up front spends it on items triage then throws
+    // away, so two dismissed headlines at the top of the feed could starve a
+    // real signal three rows down.
+    let seedBudget = seeded ? Math.max(0, SEED_MAX_JOBS) : Infinity;
+    const freshEnoughToVerify = seedFreshnessGate(Date.now());
+
+    for (const item of fresh) {
+      const mayStart = !seeded || (seedBudget > 0 && freshEnoughToVerify(item.publishedAt));
+      const record = await ingestItem(item, { startJobs: mayStart });
       if (record.verdict.keep) kept++;
-      if (record.jobId) startedJobs++;
+      if (record.jobId) {
+        startedJobs++;
+        seedBudget--;
+      }
     }
 
     s.seeding = false;
@@ -266,11 +347,59 @@ export function seedIngest(items: IngestedItem[]): void {
     s.seen.add(item.id);
     s.history.unshift(item);
   }
-  if (s.history.length > MAX_HISTORY) s.history.length = MAX_HISTORY;
+  reorder(s);
 }
 
 export function ingestHistory(limit = 50): IngestedItem[] {
   return state().history.slice(0, limit);
+}
+
+/** One screened headline by feed id, for the operator's manual verify. */
+export function ingestItemById(id: string): IngestedItem | null {
+  return state().history.find((i) => i.id === id) ?? null;
+}
+
+/**
+ * Verify a headline the screening kept but never sent to the models.
+ *
+ * The seeding pass records a day of back catalogue without spending inference
+ * on it, which is right, and it leaves those records as dead ends: promoted,
+ * reasoned about, and pointing at nothing. This is the operator's way to send
+ * one of them through, so the automated path can be shown on demand instead of
+ * waiting for the newswires to produce a crisis.
+ *
+ * Idempotent. A headline that already has a job returns it rather than paying
+ * for a second opinion on the same sentence.
+ */
+export async function verifyIngestedItem(
+  id: string,
+): Promise<{ jobId: string; alreadyRunning: boolean } | { error: string }> {
+  const record = ingestItemById(id);
+  if (!record) return { error: `No screened headline with id ${id}.` };
+  if (record.jobId) return { jobId: record.jobId, alreadyRunning: true };
+  if (!record.verdict.keep) {
+    return {
+      error:
+        "Screening dismissed this headline. Verifying it anyway would spend inference on something the filter already answered.",
+    };
+  }
+
+  const text = record.summary ? `${record.title}. ${record.summary}` : record.title;
+  const alert: AlertEvent = {
+    id: newCorrelationId(),
+    source: { type: "NEWS", name: record.sourceName, url: record.url },
+    rawText: text,
+    sourceUrl: record.url,
+    receivedAt: record.publishedAt,
+    clusterKey: clusterKeyFor(record.title),
+    metadata: { feedItemId: record.id, triage: record.verdict.reason },
+  };
+
+  const job = await startVerification(alert, {
+    dryRun: process.env.INGEST_LIVE_TRADING !== "true",
+  });
+  record.jobId = job.jobId;
+  return { jobId: job.jobId, alreadyRunning: false };
 }
 
 export function ingestStats() {

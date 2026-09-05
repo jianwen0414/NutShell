@@ -1,6 +1,12 @@
 import { errorJson, hasOperatorToken, json } from "@/lib/api";
 import { newCorrelationId } from "@/lib/ids";
-import { ingestStats, pollOnce, startPolling, stopPolling } from "@/lib/ingest";
+import {
+  ingestStats,
+  pollOnce,
+  startPolling,
+  stopPolling,
+  verifyIngestedItem,
+} from "@/lib/ingest";
 
 /**
  * Control for the news poller.
@@ -46,10 +52,28 @@ export async function POST(request: Request) {
       const result = await pollOnce({ force: true });
       return json({ result, stats: ingestStats() }, correlationId);
     }
+    case "verify": {
+      // Send one already-screened headline through the pipeline. The seeding
+      // pass records the back catalogue without verifying it, so without this
+      // a promoted headline from before the server started is a dead end no
+      // operator can rescue.
+      if (typeof body?.id !== "string" || !body.id.trim()) {
+        return errorJson(
+          "VALIDATION_FAILED",
+          "Expected the feed item id to verify.",
+          correlationId,
+        );
+      }
+      const outcome = await verifyIngestedItem(body.id.trim());
+      if ("error" in outcome) {
+        return errorJson("VALIDATION_FAILED", outcome.error, correlationId);
+      }
+      return json({ ...outcome, stats: ingestStats() }, correlationId);
+    }
     default:
       return errorJson(
         "VALIDATION_FAILED",
-        'Expected action to be "start", "stop" or "poll".',
+        'Expected action to be "start", "stop", "poll" or "verify".',
         correlationId,
       );
   }
