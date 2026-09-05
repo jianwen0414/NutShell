@@ -38,4 +38,5 @@ npm-debug.log*
 
 # Presentation and working notes, kept out of the repo.
 docs/DEMO-FLOW.md
+docs/DEMO-SCRIPT.md
 docs/WORKLOG-FINAL-UX.md
