@@ -15,6 +15,7 @@
  * empties the page of outcomes. Pass --all to include them.
  *
  *   npx tsx scripts/demo-reset.ts
+ *   npx tsx scripts/demo-reset.ts --only solana      # one row, matched on title
  *   npx tsx scripts/demo-reset.ts --all
  *   npx tsx scripts/demo-reset.ts --base http://localhost:3000
  */
@@ -29,6 +30,14 @@ const flag = (n: string) => {
 };
 const BASE = flag("base") ?? "http://localhost:3000";
 const includeSeeded = args.includes("--all");
+/**
+ * Reset a single row, matched case-insensitively against its title.
+ *
+ * Needed because the seeded rows are skipped by default, and after the live
+ * newswires rotate a story out they are the only rows left to demo with. This
+ * targets one without --all, which would clear every badge on the page.
+ */
+const only = flag("only")?.toLowerCase();
 const TOKEN = process.env.OPERATOR_TOKEN ?? "";
 
 interface EventRow {
@@ -46,12 +55,19 @@ async function main() {
   if (!res.ok) throw new Error(`GET /api/events failed: ${res.status}`);
   const rows: EventRow[] = await res.json();
 
-  const candidates = rows.filter(
-    (r) => r.jobId && (includeSeeded || !r.id.startsWith("seed-")),
-  );
+  const candidates = rows.filter((r) => {
+    if (!r.jobId) return false;
+    // An explicit --only overrides the seeded skip: naming a row is intent.
+    if (only) return r.title.toLowerCase().includes(only);
+    return includeSeeded || !r.id.startsWith("seed-");
+  });
 
   if (candidates.length === 0) {
-    console.log("Nothing to reset — every kept headline is already runnable.");
+    console.log(
+      only
+        ? `No kept headline with a job matches "${only}".`
+        : "Nothing to reset — every kept headline is already runnable.",
+    );
     return;
   }
 
@@ -76,7 +92,9 @@ async function main() {
 
   console.log(
     `\n${candidates.length} headline(s) runnable again.` +
-      (includeSeeded ? "" : "  Seeded rows left alone; pass --all to include them."),
+      (only || includeSeeded
+        ? ""
+        : "  Seeded rows left alone; use --only <text> to target one, or --all."),
   );
 }
 

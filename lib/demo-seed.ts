@@ -327,6 +327,39 @@ const CORPUS: Seed[] = [
       ],
     },
   },
+  // ── Two real headlines, kept but not worked up ─────────────────────────
+  //
+  // These are genuine articles that the live poller ingested and triage kept,
+  // reproduced here because RSS feeds only carry about a day of back catalogue
+  // and both rotated out of their publishers' feeds. Without them the Passed
+  // tab holds only worked records, so there is nothing left to send through
+  // the pipeline on demand.
+  //
+  // They carry no `worked` block on purpose. That means no job, no authored
+  // verdict and no invented score: they land as "Not verified", exactly as the
+  // live poller left them, and an operator can run the real pipeline on either.
+  //
+  // Titles, publishers and URLs are the real ones. The summaries are ours,
+  // written to restate the headline without adding detail the article did not
+  // carry, and verified to reproduce the original triage reasons byte for byte:
+  //   "Reports freeze; hedgeable via SOL (DIRECT)."
+  //   "Reports outage; hedgeable via ETH (DIRECT)."
+  {
+    title: "Hidden Solana upgrade bug can freeze network readers and silently disable fee limits",
+    summary:
+      "A defect in a recent Solana client upgrade can freeze network readers and silently disable transaction fee limits. Validators are being asked to patch.",
+    source: "CryptoSlate",
+    domain: "cryptoslate.com",
+    age: 3.5,
+  },
+  {
+    title: "Robinhood Chain Never Stopped But its Blobs Did Stop Reaching Ethereum For 14 Minutes",
+    summary:
+      "Robinhood Chain kept producing blocks, but a fourteen minute outage stopped its blobs reaching Ethereum, pausing data availability for the rollup.",
+    source: "The Defiant",
+    domain: "thedefiant.io",
+    age: 7.2,
+  },
   {
     title: "Bitcoin ETF outflows hit $214M as holders rotate into treasuries",
     summary:
